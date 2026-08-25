@@ -1,0 +1,941 @@
+﻿"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  Plus, Play, Eye, Trash2, X, Zap, Tag,
+  Pencil, Database, MessageSquare as MsgIcon,
+} from "lucide-react";
+import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import StatusBadge from "@/components/ui/status-badge";
+
+
+// â”€â”€â”€ Edit form state shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+interface ProductForm {
+  id: string;
+  name: string;
+  keywords: string; // comma separated
+  images: string[];
+  videos?: string[];
+  documents?: string[];
+  price?: number;
+  currency?: string;
+  description?: string;
+}
+
+interface EditForm {
+  project:     string;
+  headerType:  "None" | "Image" | "Video" | "Document";
+  body:        string;
+  footer:      string;
+  messageType: "Text" | "Image" | "Video" | "Document" | "Audio";
+  greeting:    string;
+  products:    ProductForm[];
+}
+
+function freshEditForm(): EditForm {
+  return {
+    project: "",
+    headerType: "None",
+    body: "",
+    footer: "",
+    messageType: "Text",
+    greeting: "Hi! How can I help you today?",
+    products: [],
+  };
+}
+
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Helpers
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function safeParseConfig(raw: any): any {
+  if (!raw) return {};
+  if (typeof raw === "string") {
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+  return raw;
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+export default function ChatbotPage() {
+  const [flows,    setFlows]    = useState<any[]>([]);
+  const [activeId, setActiveId] = useState<number|null>(null);
+  const [detail,   setDetail]   = useState<any>(null);
+  const [newName,  setNewName]  = useState("");
+  const [showNew,  setShowNew]  = useState(false);
+  const [nodeForm, setNodeForm] = useState({ nodeType:"message", text:"" });
+  const [preview,  setPreview]  = useState<any>(null);
+  const [conn,     setConn]     = useState({ source:0, target:0 });
+
+  // Edit panel
+  const [showEdit, setShowEdit] = useState(false);
+  const [editForm, setEditForm] = useState<EditForm>(freshEditForm());
+
+  const load = useCallback(async () => {
+    try { setFlows((await api.get<any[]>("/bots")) || []); } catch {}
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const open = async (id: number) => {
+    setActiveId(id);
+    setDetail(null);
+    setPreview(null);
+    setShowEdit(false);
+    setNodeForm({ nodeType:"message", text:"" });
+    setConn({ source:0, target:0 });
+    try { setDetail(await api.get<any>(`/bots/${id}`)); } catch (e: any) { alert(e.message); }
+  };
+
+  const create = async () => {
+    if (!newName) return;
+    try { const f = await api.post<any>("/bots", { name:newName }); setShowNew(false); setNewName(""); load(); open(f.id); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const addNode = async () => {
+    if (!activeId || !nodeForm.text) return;
+    try {
+      const cfg: any = { text:nodeForm.text };
+      if (nodeForm.nodeType==="question") cfg.answers=[{text:nodeForm.text,targetNodeId:null}];
+      await api.post(`/bots/${activeId}/nodes`, { nodeType:nodeForm.nodeType, config:cfg });
+      open(activeId); setNodeForm({ nodeType:"message", text:"" });
+    } catch (e: any) { alert(e.message); }
+  };
+
+  const addConn = async () => {
+    if (!activeId || !conn.source || !conn.target) return;
+    try { await api.post(`/bots/${activeId}/connections`, conn); open(activeId); setConn({ source:0, target:0 }); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const publish = async () => {
+    if (!activeId) return;
+    try { const r = await api.post<any>(`/bots/${activeId}/publish`); alert(`Flow "${r.name}" is now live`); open(activeId); load(); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const showPreview = async () => {
+    if (!activeId) return;
+    try { setPreview(await api.get<any>(`/bots/${activeId}/preview`)); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const remove = async (id: number) => {
+    if (!confirm("Delete this flow?")) return;
+    try { await api.del(`/bots/${id}`); if (activeId===id) { setDetail(null); setActiveId(null); } load(); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  // Open the edit panel â€” pre-fill from existing node data & bot config if available
+  const openEdit = (detailOverride?: any) => {
+    const d = detailOverride ?? detail;
+    const savedConfig = safeParseConfig(d?.config);
+    const firstMsgNode = d?.nodes?.find((n: any) => n.nodeType === "message");
+    const firstMsgConfig = safeParseConfig(firstMsgNode?.config);
+
+    const rawProducts = savedConfig?.products || firstMsgConfig?.products;
+    let loadedProducts: ProductForm[] = [];
+    if (Array.isArray(rawProducts)) {
+      loadedProducts = rawProducts.map((p: any) => ({
+        id: p.id || `prod-${Math.random().toString(36).substring(2, 7)}`,
+        name: p.name || "",
+        keywords: Array.isArray(p.keywords) ? p.keywords.join(", ") : p.keywords || "",
+        images: Array.isArray(p.images) ? p.images : [],
+        videos: Array.isArray(p.videos) ? p.videos : [],
+        documents: Array.isArray(p.documents) ? p.documents : [],
+        price: p.price,
+        currency: p.currency || "â‚¹",
+        description: p.description || "",
+      }));
+    }
+
+    const bodyText = firstMsgConfig?.text || savedConfig?.greeting || "Hi! How can I help you today?";
+
+    setEditForm({
+      project:     d?.name || "",
+      headerType:  "None",
+      body:        bodyText,
+      footer:      "",
+      messageType: "Text",
+      greeting:    savedConfig?.greeting || bodyText,
+      products:    loadedProducts,
+    });
+    setShowEdit(true);
+  };
+
+
+
+  // Save edit â€” saves config to flow and node (uses existing API)
+  const saveEdit = async () => {
+    if (!activeId) return;
+    try {
+      const formattedProducts = editForm.products.map(p => ({
+        id:          p.id,
+        name:        p.name.trim(),
+        keywords:    p.keywords.split(",").map(k => k.trim()).filter(Boolean),
+        images:      (p.images || []).filter(img => img && img.trim() !== ""),
+        videos:      (p.videos || []).filter(v => v && v.trim() !== ""),
+        documents:   (p.documents || []).filter(doc => doc && doc.trim() !== ""),
+        price:       p.price,
+        currency:    p.currency || "â‚¹",
+        description: p.description?.trim() || "",
+      }));
+
+      const botConfig = {
+        greeting: editForm.body.trim() || editForm.greeting || "Hi! How can I help you today?",
+        products: formattedProducts,
+      };
+
+      // 1. Try to update bot flow name on backend (non-critical â€” skip if endpoint missing)
+      try {
+        await api.put(`/bots/${activeId}`, {
+          name: editForm.project.trim() || detail?.name,
+          config: botConfig,
+        });
+      } catch { /* endpoint may not exist â€” config saved via node below */ }
+
+      // 2. Save config inside first message node (always works via existing API)
+      const firstMsg = detail?.nodes?.find((n: any) => n.nodeType === "message");
+
+      if (firstMsg) {
+        await api.put(`/bots/${activeId}/nodes/${firstMsg.id}`, {
+          config: { text: botConfig.greeting, ...botConfig },
+        });
+      } else {
+        await api.post(`/bots/${activeId}/nodes`, {
+          nodeType: "message",
+          config:   { text: botConfig.greeting, ...botConfig },
+        });
+      }
+
+      setShowEdit(false);
+      await load();
+      open(activeId);
+    } catch (e: any) {
+      alert(e.message || "Failed to save.");
+    }
+  };
+
+
+  // Publish from edit panel
+  const publishFromEdit = async () => {
+    await saveEdit();
+    await publish();
+  };
+
+  const nodes = detail?.nodes || [];
+
+  return (
+    <div className="flex gap-3" style={{ height:"calc(100vh - 128px)" }}>
+
+      {/* â”€â”€ Flow list â”€â”€ */}
+      <div className="w-[252px] shrink-0 flex flex-col card-raised overflow-hidden">
+        <div className="p-3 flex items-center justify-between" style={{ borderBottom:"1px solid rgba(34,197,94,0.18)" }}>
+          <h3 className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>Bot flows</h3>
+          <button className="btn-primary !px-2.5 !py-1.5 text-xs" onClick={() => setShowNew(!showNew)}>
+            <Plus size={11}/> New
+          </button>
+        </div>
+
+        {showNew && (
+          <div className="p-3 flex gap-2" style={{ borderBottom:"1px solid rgba(255,255,255,0.35)" }}>
+            <input className="input text-xs" placeholder="Flow name" value={newName}
+              onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key==="Enter" && create()} />
+            <button className="btn-primary !px-2.5 shrink-0" onClick={create}>Add</button>
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto">
+          {flows.map(f => (
+            <button key={f.id} onClick={() => open(f.id)}
+              className="w-full flex items-center justify-between px-4 py-3 text-left transition-colors"
+              style={{
+                borderBottom:"1px solid rgba(220,252,231,0.35)",
+                background: activeId===f.id ? "rgba(220,252,231,0.45)" : "transparent",
+              }}
+              onMouseEnter={e => { if (activeId!==f.id) e.currentTarget.style.background="rgba(220,252,231,0.25)"; }}
+              onMouseLeave={e => { if (activeId!==f.id) e.currentTarget.style.background="transparent"; }}>
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold truncate" style={{ color:"var(--t1)" }}>{f.name}</p>
+                <p className="text-[11px] mt-0.5" style={{ color:"var(--t3)" }}>{f._count?.nodes || 0} nodes</p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {f.published && <span className="badge-green text-[9px]">live</span>}
+                {/* Edit button */}
+                <button
+                  className="btn-icon"
+                  title="Edit"
+                  onClick={async e => {
+                    e.stopPropagation();
+                    if (activeId === f.id && detail) {
+                      openEdit();
+                    } else {
+                      // Load the bot first, then open edit with the loaded detail
+                      setActiveId(f.id);
+                      setDetail(null);
+                      setPreview(null);
+                      setNodeForm({ nodeType:"message", text:"" });
+                      setConn({ source:0, target:0 });
+                      try {
+                        const loaded = await api.get<any>(`/bots/${f.id}`);
+                        setDetail(loaded);
+                        openEdit(loaded);
+                      } catch (e: any) { alert(e.message); }
+                    }
+                  }}
+                >
+                  <Pencil size={11}/>
+                </button>
+                <button className="btn-icon" style={{ color:"#dc2626" }}
+                  onClick={e => { e.stopPropagation(); remove(f.id); }}>
+                  <Trash2 size={12}/>
+                </button>
+              </div>
+            </button>
+          ))}
+          {flows.length===0 && (
+            <div className="empty-state !py-10">
+              <div className="empty-icon"><Zap size={18}/></div>
+              <p className="empty-desc">No flows yet.</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* â”€â”€ Builder / Edit panel â”€â”€ */}
+      <div className="flex-1 flex flex-col min-w-0 card-raised overflow-hidden">
+        {!detail ? (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3">
+            <div className="empty-icon icon-box-xl"><Zap size={22}/></div>
+            <p className="empty-title">Select or create a flow</p>
+            <p className="empty-desc">Choose a bot flow to start building.</p>
+          </div>
+        ) : showEdit ? (
+
+          /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+             EDIT PANEL  (matches reference UI)
+             â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+          <div className="flex flex-col h-full">
+            {/* Header */}
+            <div className="px-5 py-3 flex items-center gap-3 shrink-0"
+              style={{ borderBottom:"1px solid rgba(34,197,94,0.18)", background:"rgba(220,252,231,0.20)" }}>
+              <h3 className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>{detail.name}</h3>
+              <StatusBadge status={detail.published ? "approved" : "draft"} label={detail.published ? "Published" : "Draft"} />
+              <div className="flex-1"/>
+              <button className="btn-secondary !py-1.5 text-xs" onClick={() => setShowEdit(false)}>
+                <X size={11}/> Close Edit
+              </button>
+            </div>
+
+            {/* Scrollable form body */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+
+              {/* â”€â”€ Project Selection â”€â”€ */}
+              <div className="card-raised p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Database size={15} style={{ color:"var(--gp)" }}/>
+                  <h4 className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>Project Selection</h4>
+                </div>
+                <div>
+                  <label className="label">Bot / Project Name <span style={{ color:"#dc2626" }}>*</span></label>
+                  <input
+                    className="input text-xs"
+                    placeholder="Enter bot flow / project name..."
+                    value={editForm.project}
+                    onChange={e => setEditForm({...editForm, project:e.target.value})}
+                  />
+                  <p className="text-[11px] mt-1.5" style={{ color:"var(--t3)" }}>
+                    Configure the name of this bot flow for identification and embedding
+                  </p>
+                </div>
+
+              </div>
+
+              {/* â”€â”€ First Message on Customer Response â”€â”€ */}
+              <div className="card-raised p-5">
+                <div className="flex items-center gap-2 mb-5">
+                  <MsgIcon size={15} style={{ color:"var(--gp)" }}/>
+                  <h4 className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>First Message on Customer Response</h4>
+                </div>
+
+                {/* Header message type tabs */}
+                <div className="mb-4">
+                  <label className="label">
+                    Header message <span style={{ color:"#dc2626" }}>*</span>
+                  </label>
+                  <div className="tab-row mt-1 !p-1 w-fit">
+                    {(["None","Image","Video","Document"] as const).map(t => (
+                      <button key={t}
+                        className={cn("tab-item !px-4 !py-1.5 !text-[12px]", editForm.headerType===t && "active")}
+                        onClick={() => setEditForm({...editForm, headerType:t})}>
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Body message */}
+                <div className="mb-4">
+                  <label className="label">
+                    Body message <span style={{ color:"#dc2626" }}>*</span>
+                  </label>
+                  <textarea
+                    className="input"
+                    rows={4}
+                    placeholder="Enter the first message your chatbot will sendâ€¦"
+                    value={editForm.body}
+                    onChange={e => setEditForm({...editForm, body:e.target.value})}
+                  />
+                </div>
+
+                {/* Footer */}
+                <div className="mb-4">
+                  <label className="label">Footer</label>
+                  <input className="input" placeholder="Enter footer"
+                    value={editForm.footer}
+                    onChange={e => setEditForm({...editForm, footer:e.target.value})} />
+                </div>
+
+                {/* Message type */}
+                <div>
+                  <label className="label">
+                    Select message type <span style={{ color:"#dc2626" }}>*</span>
+                  </label>
+                  <select className="input" value={editForm.messageType}
+                    onChange={e => setEditForm({...editForm, messageType:e.target.value as EditForm["messageType"]})}>
+                    {["Text","Image","Video","Document","Audio"].map(t => (
+                      <option key={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* â”€â”€ Custom Products & Keywords Section â”€â”€ */}
+              <div className="card-raised p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Tag size={15} style={{ color:"var(--gp)" }}/>
+                    <div>
+                      <h4 className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>Bot Products & Keyword Gallery</h4>
+                      <p className="text-[11px]" style={{ color:"var(--t3)" }}>
+                        User inbox mein product keywords type karega (e.g. &quot;ring&quot;), toh yeh multiple images dikhayega.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-primary !py-1 !px-3 text-xs"
+                    onClick={() => {
+                      const newProd: ProductForm = {
+                        id: `prod-${Date.now()}`,
+                        name: "New Product",
+                        keywords: "item, product",
+                        images: [
+                          "https://images.pexels.com/photos/265906/pexels-photo-265906.jpeg?w=400&h=400&fit=crop",
+                        ],
+                        price: 999,
+                        currency: "â‚¹",
+                      };
+                      setEditForm({ ...editForm, products: [...editForm.products, newProd] });
+                    }}
+                  >
+                    + Add Product
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  {editForm.products.map((p, pIdx) => (
+                    <div key={p.id || pIdx} className="card p-4 rounded-xl relative space-y-3" style={{ background:"rgba(255,255,255,0.4)" }}>
+                      <div className="flex items-center justify-between border-b pb-2" style={{ borderColor:"rgba(0,0,0,0.05)" }}>
+                        <span className="font-semibold text-xs text-emerald-800">Product #{pIdx + 1}</span>
+                        <button
+                          type="button"
+                          className="btn-icon text-red-500 hover:text-red-700"
+                          onClick={() => {
+                            const updated = editForm.products.filter((_, idx) => idx !== pIdx);
+                            setEditForm({ ...editForm, products: updated });
+                          }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="label">Product Name <span style={{ color:"#dc2626" }}>*</span></label>
+                          <input
+                            className="input text-xs"
+                            placeholder="e.g. Ring, Saree, Mobile"
+                            value={p.name}
+                            onChange={e => {
+                              const updated = [...editForm.products];
+                              updated[pIdx].name = e.target.value;
+                              setEditForm({ ...editForm, products: updated });
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label className="label">Price (Optional)</label>
+                          <input
+                            type="number"
+                            className="input text-xs"
+                            placeholder="e.g. 2499"
+                            value={p.price || ""}
+                            onChange={e => {
+                              const updated = [...editForm.products];
+                              updated[pIdx].price = Number(e.target.value) || undefined;
+                              setEditForm({ ...editForm, products: updated });
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="label">Trigger Keywords (comma separated) <span style={{ color:"#dc2626" }}>*</span></label>
+                        <input
+                          className="input text-xs"
+                          placeholder="e.g. ring, rings, solitaire, diamond ring"
+                          value={p.keywords}
+                          onChange={e => {
+                            const updated = [...editForm.products];
+                            updated[pIdx].keywords = e.target.value;
+                            setEditForm({ ...editForm, products: updated });
+                          }}
+                        />
+                        <p className="text-[10px] mt-1" style={{ color:"var(--t3)" }}>
+                          Jab user inbox mein inme se koi keyword bolega, yeh product show hoga.
+                        </p>
+                      </div>
+
+                      {/* Images list for this product */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="label mb-0">Product Images (Different Angles/Views)</label>
+                          <div className="flex items-center gap-2">
+                            <label className="btn-secondary !py-1 !px-2 text-[11px] cursor-pointer">
+                              + Upload File
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  try {
+                                    const fd = new FormData();
+                                    fd.append("file", file);
+                                    const uploaded = await api.upload<any>("/upload", fd);
+                                    const imgUrl = uploaded?.url || uploaded?.path || String(uploaded);
+                                    const updated = [...editForm.products];
+                                    updated[pIdx].images.push(imgUrl);
+                                    setEditForm({ ...editForm, products: updated });
+                                  } catch (err: any) {
+                                    alert(err.message || "Image upload failed");
+                                  }
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="btn-secondary !py-1 !px-2 text-[11px]"
+                              onClick={() => {
+                                const updated = [...editForm.products];
+                                updated[pIdx].images.push("https://images.pexels.com/photos/265906/pexels-photo-265906.jpeg?w=400&h=400&fit=crop");
+                                setEditForm({ ...editForm, products: updated });
+                              }}
+                            >
+                              + Add URL
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {p.images.map((imgUrl, imgIdx) => (
+                            <div key={imgIdx} className="flex items-center gap-2">
+                              <img
+                                src={imgUrl}
+                                alt={`View ${imgIdx + 1}`}
+                                className="w-9 h-9 rounded object-cover border shrink-0 bg-white"
+                                onError={(e) => { (e.target as HTMLElement).style.display = "none"; }}
+                              />
+                              <input
+                                className="input text-xs flex-1"
+                                placeholder="Image URL (http://...)"
+                                value={imgUrl}
+                                onChange={e => {
+                                  const updated = [...editForm.products];
+                                  updated[pIdx].images[imgIdx] = e.target.value;
+                                  setEditForm({ ...editForm, products: updated });
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn-icon text-red-500"
+                                onClick={() => {
+                                  const updated = [...editForm.products];
+                                  updated[pIdx].images = updated[pIdx].images.filter((_, idx) => idx !== imgIdx);
+                                  setEditForm({ ...editForm, products: updated });
+                                }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Product Videos */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="label mb-0">Product Videos (Optional)</label>
+                          <div className="flex items-center gap-2">
+                            <label className="btn-secondary !py-1 !px-2 text-[11px] cursor-pointer">
+                              + Upload Video
+                              <input
+                                type="file"
+                                accept="video/*"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  try {
+                                    const fd = new FormData();
+                                    fd.append("file", file);
+                                    const uploaded = await api.upload<any>("/upload", fd);
+                                    const vUrl = uploaded?.url || uploaded?.path || String(uploaded);
+                                    const updated = [...editForm.products];
+                                    if (!updated[pIdx].videos) updated[pIdx].videos = [];
+                                    updated[pIdx].videos!.push(vUrl);
+                                    setEditForm({ ...editForm, products: updated });
+                                  } catch (err: any) {
+                                    alert(err.message || "Video upload failed");
+                                  }
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="btn-secondary !py-1 !px-2 text-[11px]"
+                              onClick={() => {
+                                const updated = [...editForm.products];
+                                if (!updated[pIdx].videos) updated[pIdx].videos = [];
+                                updated[pIdx].videos!.push("");
+                                setEditForm({ ...editForm, products: updated });
+                              }}
+                            >
+                              + Add Video URL
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {(p.videos || []).map((vUrl, vIdx) => (
+                            <div key={vIdx} className="flex items-center gap-2">
+                              <input
+                                className="input text-xs flex-1"
+                                placeholder="Video URL (http://...)"
+                                value={vUrl}
+                                onChange={e => {
+                                  const updated = [...editForm.products];
+                                  if (!updated[pIdx].videos) updated[pIdx].videos = [];
+                                  updated[pIdx].videos![vIdx] = e.target.value;
+                                  setEditForm({ ...editForm, products: updated });
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn-icon text-red-500"
+                                onClick={() => {
+                                  const updated = [...editForm.products];
+                                  if (updated[pIdx].videos) {
+                                    updated[pIdx].videos = updated[pIdx].videos!.filter((_, idx) => idx !== vIdx);
+                                  }
+                                  setEditForm({ ...editForm, products: updated });
+                                }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Product Documents */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="label mb-0">Product Documents / PDFs (Optional)</label>
+                          <div className="flex items-center gap-2">
+                            <label className="btn-secondary !py-1 !px-2 text-[11px] cursor-pointer">
+                              + Upload Doc
+                              <input
+                                type="file"
+                                accept=".pdf,.doc,.docx,.ppt,.pptx,.txt"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  try {
+                                    const fd = new FormData();
+                                    fd.append("file", file);
+                                    const uploaded = await api.upload<any>("/upload", fd);
+                                    const dUrl = uploaded?.url || uploaded?.path || String(uploaded);
+                                    const updated = [...editForm.products];
+                                    if (!updated[pIdx].documents) updated[pIdx].documents = [];
+                                    updated[pIdx].documents!.push(dUrl);
+                                    setEditForm({ ...editForm, products: updated });
+                                  } catch (err: any) {
+                                    alert(err.message || "Document upload failed");
+                                  }
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="btn-secondary !py-1 !px-2 text-[11px]"
+                              onClick={() => {
+                                const updated = [...editForm.products];
+                                if (!updated[pIdx].documents) updated[pIdx].documents = [];
+                                updated[pIdx].documents!.push("");
+                                setEditForm({ ...editForm, products: updated });
+                              }}
+                            >
+                              + Add Doc URL
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {(p.documents || []).map((dUrl, dIdx) => (
+                            <div key={dIdx} className="flex items-center gap-2">
+                              <input
+                                className="input text-xs flex-1"
+                                placeholder="Document URL (http://...)"
+                                value={dUrl}
+                                onChange={e => {
+                                  const updated = [...editForm.products];
+                                  if (!updated[pIdx].documents) updated[pIdx].documents = [];
+                                  updated[pIdx].documents![dIdx] = e.target.value;
+                                  setEditForm({ ...editForm, products: updated });
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn-icon text-red-500"
+                                onClick={() => {
+                                  const updated = [...editForm.products];
+                                  if (updated[pIdx].documents) {
+                                    updated[pIdx].documents = updated[pIdx].documents!.filter((_, idx) => idx !== dIdx);
+                                  }
+                                  setEditForm({ ...editForm, products: updated });
+                                }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Product Description */}
+                      <div>
+                        <label className="label">Product Description / Details (Optional)</label>
+                        <textarea
+                          className="input text-xs"
+                          rows={2}
+                          placeholder="Enter product description, specifications, or notes..."
+                          value={p.description || ""}
+                          onChange={e => {
+                            const updated = [...editForm.products];
+                            updated[pIdx].description = e.target.value;
+                            setEditForm({ ...editForm, products: updated });
+                          }}
+                        />
+                      </div>
+
+                    </div>
+                  ))}
+
+                  {editForm.products.length === 0 && (
+                    <p className="text-xs text-center py-4" style={{ color:"var(--t3)" }}>
+                      No custom products added yet. Click &quot;+ Add Product&quot; above.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* â”€â”€ Action bar (Cancel / Publish / Save) â”€â”€ */}
+            <div
+              className="shrink-0 flex items-center justify-end gap-3 px-5 py-3.5"
+              style={{ borderTop:"1px solid rgba(34,197,94,0.18)", background:"rgba(220,252,231,0.35)" }}
+            >
+              <button className="btn-secondary" onClick={() => setShowEdit(false)}>Cancel</button>
+              <button
+                className="btn"
+                style={{
+                  background:"linear-gradient(155deg,#1e3a5f 0%,#1a2e4a 100%)",
+                  color:"#fff",
+                  border:"1px solid rgba(220,252,231,0.25)",
+                  boxShadow:"0 2px 10px rgba(0,0,0,0.20)",
+                }}
+                onClick={publishFromEdit}
+              >
+                Publish
+              </button>
+              <button className="btn-primary" onClick={saveEdit}>Save</button>
+            </div>
+          </div>
+
+        ) : (
+
+          /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+             BUILDER PANEL  (existing UI)
+             â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+          <>
+            <div className="px-5 py-3 flex items-center gap-3 shrink-0"
+              style={{ borderBottom:"1px solid rgba(34,197,94,0.18)", background:"rgba(220,252,231,0.20)" }}>
+              <h3 className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>{detail.name}</h3>
+              <StatusBadge status={detail.published ? "approved" : "draft"} label={detail.published ? "Published" : "Draft"} />
+              <div className="flex-1"/>
+              {/* Edit button in header */}
+              <button className="btn-secondary !py-1.5 text-xs" onClick={openEdit}>
+                <Pencil size={11}/> Edit
+              </button>
+              <button className="btn-secondary !py-1.5 text-xs" onClick={showPreview}><Eye size={11}/> Preview</button>
+              <button className="btn-primary  !py-1.5 text-xs" onClick={publish}><Play size={11}/> Publish</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4">
+              {preview && (
+                <div className="card-raised p-4 mb-4 animate-slide-up">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="font-bold text-[13px]" style={{ color:"var(--t1)" }}>Preview: {preview.flowName}</p>
+                    <button className="btn-icon" onClick={() => setPreview(null)}><X size={13}/></button>
+                  </div>
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {preview.preview.map((p: any, i: number) => (
+                      <div key={i} className={cn("text-[13px] max-w-sm",
+                        (p.nodeType==="message"||p.nodeType==="question") ? "bubble-out ml-auto" : "bubble-in")}>
+                        <span className="text-[9px] uppercase tracking-widest opacity-40 block mb-0.5">{p.nodeType}</span>
+                        {p.text}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+
+                {/* Nodes */}
+                <div className="card p-4">
+                  <p className="label mb-3">Nodes ({nodes.length})</p>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto mb-4">
+                    {nodes.map((n: any) => (
+                      <div key={n.id} className="card-green text-[11px] px-3 py-2 flex items-center justify-between">
+                        <span style={{ color:"var(--t2)" }}>{n.nodeType} Â· {n.name}</span>
+                        <span className="code-tag">#{n.id}</span>
+                      </div>
+                    ))}
+                    {nodes.length===0 && <p className="text-[12px]" style={{ color:"var(--t3)" }}>No nodes yet.</p>}
+                  </div>
+                  <div className="space-y-2">
+                    <div>
+                      <label className="label">Type</label>
+                      <select className="input !py-1.5 text-xs" value={nodeForm.nodeType}
+                        onChange={e => setNodeForm({...nodeForm,nodeType:e.target.value})}>
+                        {["message","question","button","delay","api","handover","end"].map(t => <option key={t}>{t}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="label">Text</label>
+                      <input className="input !py-1.5 text-xs" placeholder="Node text" value={nodeForm.text}
+                        onChange={e => setNodeForm({...nodeForm,text:e.target.value})} />
+                    </div>
+                    <button className="btn-secondary w-full !py-1.5 text-xs" onClick={addNode}>Add node</button>
+                  </div>
+                </div>
+
+                {/* Connections */}
+                <div className="card p-4">
+                  <p className="label mb-3">Connections</p>
+                  <div className="space-y-1.5 max-h-28 overflow-y-auto mb-4">
+                    {detail.connections.map((c: any) => (
+                      <div key={c.id} className="card-green text-[11px] px-3 py-2">
+                        <span className="code-tag">#{c.sourceNode}</span> â†’ <span className="code-tag">#{c.targetNode}</span>
+                      </div>
+                    ))}
+                    {detail.connections.length===0 && <p className="text-[12px]" style={{ color:"var(--t3)" }}>No connections yet.</p>}
+                  </div>
+                  <div className="space-y-2">
+                    <div>
+                      <label className="label">From node</label>
+                      <select className="input !py-1.5 text-xs" value={conn.source}
+                        onChange={e => setConn({...conn,source:Number(e.target.value)})}>
+                        <option value={0}>Select node</option>
+                        {nodes.map((n: any) => <option key={n.id} value={Number(n.id)}>#{n.id} {n.nodeType}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="label">To node</label>
+                      <select className="input !py-1.5 text-xs" value={conn.target}
+                        onChange={e => setConn({...conn,target:Number(e.target.value)})}>
+                        <option value={0}>Select node</option>
+                        {nodes.map((n: any) => <option key={n.id} value={Number(n.id)}>#{n.id} {n.nodeType}</option>)}
+                      </select>
+                    </div>
+                    <button className="btn-secondary w-full !py-1.5 text-xs" onClick={addConn}>Connect nodes</button>
+                  </div>
+                </div>
+
+                {/* Status + Keywords */}
+                <div className="card-green p-4 space-y-3">
+                  <div>
+                    <p className="label mb-2">Status</p>
+                    <div className="flex items-center gap-2">
+                      <StatusBadge
+                        status={detail.published ? "approved" : "draft"}
+                        label={detail.published ? "Live in Inbox" : "Draft â€” not active"}
+                      />
+                      {!detail.published && (
+                        <p className="text-[10px]" style={{ color:"var(--t3)" }}>Publish to activate in Inbox</p>
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="label mb-2 flex items-center gap-1"><Tag size={9}/> Configured triggers</p>
+                    <div className="space-y-1.5">
+                      {((detail?.config as any)?.products || []).map((p: any, i: number) => (
+                        <div key={i} className="text-[11px] flex items-start gap-2">
+                          <span className="font-semibold shrink-0 w-24" style={{ color:"var(--t1)" }}>{p.name}</span>
+                          <span style={{ color:"var(--t3)" }}>{Array.isArray(p.keywords) ? p.keywords.join(", ") : p.keywords}</span>
+                        </div>
+                      ))}
+                      {(!detail?.config?.products || detail.config.products.length === 0) && (
+                        <p className="text-[11px]" style={{ color:"var(--t3)" }}>No custom keywords configured yet. Click &quot;Edit&quot; above to add products.</p>
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="label mb-1.5">How it works</p>
+                    {[
+                      "hi / hello â†’ configured greeting message",
+                      "User types product keyword â†’ product details & gallery",
+                      "Multiple products & keywords supported dynamically",
+                      "Draft bot â†’ silent in Inbox",
+                    ].map((tip,i) => (
+                      <p key={i} className="text-[11px] leading-relaxed" style={{ color:"var(--t2)" }}>Â· {tip}</p>
+                    ))}
+                  </div>
+
+                </div>
+
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+

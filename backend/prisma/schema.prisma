@@ -1,0 +1,689 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        BigInt   @id @default(autoincrement())
+  name      String   @db.VarChar(150)
+  slug      String   @unique @db.VarChar(100)
+  email     String?  @db.VarChar(150)
+  phone     String?  @db.VarChar(30)
+  logo      String?  @db.VarChar(255)
+  website   String?  @db.VarChar(255)
+  timezone  String   @default("Asia/Kolkata") @db.VarChar(100)
+  currency  String   @default("INR") @db.VarChar(10)
+  status    String   @default("active") @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  users               User[]
+  roles               Role[]
+  wabaAccounts        WabaAccount[]
+  numbers             WhatsappNumber[]
+  contacts            Contact[]
+  tags                Tag[]
+  templates           Template[]
+  campaigns           Campaign[]
+  conversations       Conversation[]
+  messages            Message[]
+  botFlows            BotFlow[]
+  wallets             Wallet[]
+  invoices            Invoice[]
+  apiKeys             ApiKey[]
+  webhooks            Webhook[]
+  auditLogs           AuditLog[]
+  conversationLabels  ConversationLabel[]
+  customFields        CustomField[]
+  media               Media[]
+  dndEntries          DndEntry[]
+  automationWorkflows AutomationWorkflow[]
+  whatsappFlows       WhatsappFlow[]
+  segments            Segment[]
+
+  @@map("organizations")
+}
+
+model Role {
+  id             BigInt  @id @default(autoincrement())
+  organizationId BigInt  @map("organization_id")
+  name           String  @db.VarChar(100)
+  description    String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users        User[]
+  permissions  RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          BigInt  @id @default(autoincrement())
+  code        String  @unique @db.VarChar(150)
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       BigInt @map("role_id")
+  permissionId BigInt @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @map("organization_id")
+  roleId         BigInt   @map("role_id")
+  firstName      String   @map("first_name") @db.VarChar(100)
+  lastName       String   @map("last_name") @db.VarChar(100)
+  email          String   @unique @db.VarChar(150)
+  mobile         String?  @db.VarChar(30)
+  passwordHash   String   @map("password_hash") @db.VarChar(255)
+  avatar         String?  @db.VarChar(255)
+  status         String   @default("active") @db.VarChar(20)
+  lastLogin      DateTime? @map("last_login")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization  Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role          Role                 @relation(fields: [roleId], references: [id])
+  conversations Conversation[]       @relation("AssignedConversations")
+  notes         ConversationNote[]
+  createdFlows  BotFlow[]
+  sessions      LoginSession[]
+  auditLogs     AuditLog[]
+  customFields  CustomField[]
+  media         Media[]
+  automationWorkflows AutomationWorkflow[]
+  whatsappFlows WhatsappFlow[]
+  createdSegments Segment[]
+
+  @@index([organizationId])
+  @@map("users")
+}
+
+model LoginSession {
+  id           BigInt   @id @default(autoincrement())
+  userId       BigInt   @map("user_id")
+  refreshToken String   @map("refresh_token") @db.Text
+  expiresAt    DateTime @map("expires_at")
+  ipAddress    String?  @map("ip_address") @db.VarChar(45)
+  device       String?  @db.VarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("login_sessions")
+}
+
+model WabaAccount {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  businessId     String    @map("business_id") @db.VarChar(100)
+  wabaId         String    @map("waba_id") @db.VarChar(100)
+  accessToken    String    @map("access_token") @db.Text
+  tokenExpiry    DateTime? @map("token_expiry")
+  qualityRating  String    @default("UNKNOWN") @map("quality_rating") @db.VarChar(30)
+  status         String    @default("connected") @db.VarChar(30)
+  webhookSecret  String?   @map("webhook_secret") @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  numbers      WhatsappNumber[]
+
+  @@index([organizationId])
+  @@map("waba_accounts")
+}
+
+model WhatsappNumber {
+  id                 BigInt    @id @default(autoincrement())
+  organizationId     BigInt    @map("organization_id")
+  wabaAccountId      BigInt    @map("waba_account_id")
+  phoneNumber        String    @map("phone_number") @db.VarChar(30)
+  phoneNumberId      String    @map("phone_number_id") @db.VarChar(100)
+  displayName        String    @map("display_name") @db.VarChar(150)
+  verificationStatus String    @default("verified") @map("verification_status") @db.VarChar(50)
+  qualityRating      String    @default("GREEN") @map("quality_rating") @db.VarChar(30)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  wabaAccount    WabaAccount    @relation(fields: [wabaAccountId], references: [id], onDelete: Cascade)
+  conversations  Conversation[]
+  messages       Message[]
+
+  @@index([organizationId])
+  @@map("whatsapp_numbers")
+}
+
+model Contact {
+  id              BigInt    @id @default(autoincrement())
+  organizationId  BigInt    @map("organization_id")
+  firstName       String    @map("first_name") @db.VarChar(100)
+  lastName        String?   @map("last_name") @db.VarChar(100)
+  mobile          String    @db.VarChar(30)
+  email           String?   @db.VarChar(150)
+  city            String?   @db.VarChar(100)
+  state           String?   @db.VarChar(100)
+  country         String?   @db.VarChar(100)
+  optIn           Boolean   @default(true) @map("opt_in")
+  source          String?   @db.VarChar(100)
+  lastInteraction DateTime? @map("last_interaction")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contactTags   ContactTag[]
+  conversations Conversation[]
+  campaignLogs  CampaignLog[]
+
+  @@index([organizationId])
+  @@index([mobile])
+  @@index([email])
+  @@map("contacts")
+}
+
+model Tag {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @map("organization_id")
+  name           String   @db.VarChar(100)
+  color          String   @default("#25D366") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contactTags  ContactTag[]
+
+  @@index([organizationId])
+  @@map("tags")
+}
+
+model ContactTag {
+  contactId BigInt @map("contact_id")
+  tagId     BigInt @map("tag_id")
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@map("contact_tags")
+}
+
+model Conversation {
+  id              BigInt    @id @default(autoincrement())
+  organizationId  BigInt    @map("organization_id")
+  contactId       BigInt    @map("contact_id")
+  assignedAgentId BigInt?   @map("assigned_agent")
+  whatsappNumberId BigInt?  @map("whatsapp_number_id")
+  status          String    @default("open") @db.VarChar(20)
+  priority        String    @default("medium") @db.VarChar(20)
+  channel         String    @default("whatsapp") @db.VarChar(50)
+  startedAt       DateTime  @default(now()) @map("started_at")
+  closedAt        DateTime? @map("closed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contact        Contact           @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedAgent  User?             @relation("AssignedConversations", fields: [assignedAgentId], references: [id])
+  whatsappNumber WhatsappNumber?   @relation(fields: [whatsappNumberId], references: [id])
+  messages       Message[]
+  notes          ConversationNote[]
+  labels         ConversationLabelMap[]
+
+  @@index([organizationId])
+  @@index([contactId])
+  @@index([assignedAgentId])
+  @@map("conversations")
+}
+
+model Message {
+  id                BigInt    @id @default(autoincrement())
+  organizationId    BigInt    @map("organization_id")
+  conversationId    BigInt    @map("conversation_id")
+  whatsappNumberId  BigInt?   @map("whatsapp_number_id")
+  senderType        String    @map("sender_type") @db.VarChar(20)
+  senderId          BigInt?
+  messageType       String    @map("message_type") @default("text") @db.VarChar(30)
+  messageText       String?   @map("message_text") @db.LongText
+  mediaUrl          String?   @map("media_url") @db.Text
+  metaMessageId     String?   @map("meta_message_id") @db.VarChar(150)
+  status            String    @default("sent") @db.VarChar(30)
+  sentAt            DateTime? @map("sent_at")
+  deliveredAt       DateTime? @map("delivered_at")
+  readAt            DateTime? @map("read_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  whatsappNumber WhatsappNumber?   @relation(fields: [whatsappNumberId], references: [id])
+  attachments    MessageAttachment[]
+  campaignLogs   CampaignLog[]
+
+  @@index([organizationId])
+  @@index([conversationId])
+  @@unique([organizationId, metaMessageId], name: "uniq_org_meta_message")
+  @@map("messages")
+}
+
+model MessageAttachment {
+  id        BigInt  @id @default(autoincrement())
+  messageId BigInt  @map("message_id")
+  fileName  String  @map("file_name") @db.VarChar(255)
+  fileType  String  @map("file_type") @db.VarChar(100)
+  fileSize  BigInt? @map("file_size")
+  url       String? @db.Text
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("message_attachments")
+}
+
+model Template {
+  id              BigInt    @id @default(autoincrement())
+  organizationId  BigInt    @map("organization_id")
+  metaTemplateId  String?   @map("meta_template_id") @db.VarChar(150)
+  name            String    @db.VarChar(150)
+  category        String    @default("UTILITY") @db.VarChar(50)
+  language        String    @default("en") @db.VarChar(20)
+  status          String    @default("draft") @db.VarChar(50)
+  header          String?   @db.Text
+  body            String    @db.LongText
+  footer          String?   @db.Text
+  rejectionReason String?   @map("rejection_reason") @db.Text
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+
+  @@index([organizationId])
+  @@index([metaTemplateId])
+  @@map("templates")
+}
+
+model Campaign {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  templateId     BigInt?   @map("template_id")
+  name           String    @db.VarChar(150)
+  status         String    @default("draft") @db.VarChar(30)
+  audience       Json?
+  scheduledAt    DateTime? @map("scheduled_at")
+  startedAt      DateTime? @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  totalContacts  Int       @default(0) @map("total_contacts")
+  sentCount      Int       @default(0) @map("sent_count")
+  deliveredCount Int       @default(0) @map("delivered_count")
+  readCount      Int       @default(0) @map("read_count")
+  failedCount    Int       @default(0) @map("failed_count")
+  errorCount     Int       @default(0) @map("error_count")
+  retryAttempt   Int       @default(0) @map("retry_attempt")
+  ratePerMinute  Int       @default(60) @map("rate_per_minute")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  template     Template?    @relation(fields: [templateId], references: [id])
+  logs         CampaignLog[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("campaigns")
+}
+
+model CampaignLog {
+  id         BigInt    @id @default(autoincrement())
+  campaignId BigInt    @map("campaign_id")
+  contactId  BigInt    @map("contact_id")
+  messageId  BigInt?   @map("message_id")
+  status     String    @db.VarChar(30)
+  error      String?   @db.Text
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact  Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  message  Message? @relation(fields: [messageId], references: [id])
+
+  @@index([campaignId])
+  @@index([status])
+  @@map("campaign_logs")
+}
+
+model ConversationNote {
+  id             BigInt   @id @default(autoincrement())
+  conversationId BigInt   @map("conversation_id")
+  userId         BigInt   @map("user_id")
+  note           String   @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@map("conversation_notes")
+}
+
+model ConversationLabel {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  label          String    @db.VarChar(100)
+  color          String    @default("#25D366") @db.VarChar(20)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversations  ConversationLabelMap[]
+
+  @@index([organizationId])
+  @@map("conversation_labels")
+}
+
+model ConversationLabelMap {
+  conversationId BigInt @map("conversation_id")
+  labelId        BigInt @map("label_id")
+
+  conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  label        ConversationLabel @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, labelId])
+  @@map("conversation_label_map")
+}
+
+model BotFlow {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  name           String    @db.VarChar(150)
+  published      Boolean   @default(false)
+  config         Json?     @map("config")
+  createdById    BigInt    @map("created_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User         @relation(fields: [createdById], references: [id])
+  nodes        BotNode[]
+  connections  BotConnection[]
+
+  @@index([organizationId])
+  @@map("bot_flows")
+}
+
+model BotNode {
+  id        BigInt   @id @default(autoincrement())
+  flowId    BigInt   @map("flow_id")
+  nodeType  String   @map("node_type") @db.VarChar(50)
+  name      String?  @db.VarChar(150)
+  config    Json?
+  positionX Int      @default(0) @map("position_x")
+  positionY Int      @default(0) @map("position_y")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  flow            BotFlow        @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  connectionsFrom BotConnection[] @relation("BotConnectionSource")
+  connectionsTo   BotConnection[] @relation("BotConnectionTarget")
+
+  @@index([flowId])
+  @@map("bot_nodes")
+}
+
+model BotConnection {
+  id         BigInt @id @default(autoincrement())
+  flowId     BigInt @map("flow_id")
+  sourceNode BigInt @map("source_node")
+  targetNode BigInt @map("target_node")
+
+  flow   BotFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  source BotNode @relation("BotConnectionSource", fields: [sourceNode], references: [id], onDelete: Cascade)
+  target BotNode @relation("BotConnectionTarget", fields: [targetNode], references: [id], onDelete: Cascade)
+
+  @@index([flowId])
+  @@map("bot_connections")
+}
+
+model Wallet {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @unique @map("organization_id")
+  balance        Decimal  @default(0) @db.Decimal(15, 2)
+  currency       String   @default("INR") @db.VarChar(10)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id           BigInt    @id @default(autoincrement())
+  walletId     BigInt    @map("wallet_id")
+  type         String    @db.VarChar(30)
+  amount       Decimal   @db.Decimal(15, 2)
+  balanceAfter Decimal   @map("balance_after") @db.Decimal(15, 2)
+  reference    String?   @db.VarChar(255)
+  description  String?   @db.VarChar(255)
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@map("wallet_transactions")
+}
+
+model Invoice {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  invoiceNumber  String    @unique @map("invoice_number") @db.VarChar(100)
+  subtotal       Decimal   @db.Decimal(15, 2)
+  tax            Decimal   @default(0) @db.Decimal(15, 2)
+  total          Decimal   @db.Decimal(15, 2)
+  status         String    @default("paid") @db.VarChar(30)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("invoices")
+}
+
+model ApiKey {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  apiKey         String    @unique @map("api_key") @db.VarChar(255)
+  secret         String    @db.VarChar(255)
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+model Webhook {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  endpoint       String    @db.Text
+  secret         String?   @db.VarChar(255)
+  events         Json?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  logs         WebhookLog[]
+
+  @@index([organizationId])
+  @@map("webhooks")
+}
+
+model WebhookLog {
+  id           BigInt    @id @default(autoincrement())
+  webhookId    BigInt    @map("webhook_id")
+  event        String?   @db.VarChar(100)
+  payload      Json?
+  responseCode Int?      @map("response_code")
+  status       String    @default("sent") @db.VarChar(30)
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+  @@index([createdAt])
+  @@map("webhook_logs")
+}
+
+model AuditLog {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt?   @map("organization_id")
+  userId         BigInt?   @map("user_id")
+  action         String    @db.VarChar(255)
+  entity         String?   @db.VarChar(100)
+  entityId       BigInt?   @map("entity_id")
+  ipAddress      String?   @map("ip_address") @db.VarChar(45)
+  userAgent      String?   @map("user_agent") @db.Text
+  metadata       Json?
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  user         User?         @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// Custom Fields — org-defined extra data fields for contacts/conversations
+model CustomField {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @map("organization_id")
+  name           String   @db.VarChar(150)
+  fieldType      String   @map("field_type") @db.VarChar(30) // text, number, date, dropdown, boolean, email, phone
+  defaultValue   String?  @map("default_value") @db.VarChar(255)
+  options        Json?    // for dropdown-type fields
+  showInListing  Boolean  @default(true) @map("show_in_listing")
+  status         Boolean  @default(true)
+  mandatory      Boolean  @default(false)
+  createdById    BigInt?  @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdById], references: [id])
+
+  @@index([organizationId])
+  @@map("custom_fields")
+}
+
+/// Media library — files uploaded for use in templates/broadcasts/chats
+model Media {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @map("organization_id")
+  mediaId        String   @unique @map("media_id") @db.VarChar(60)
+  name           String   @db.VarChar(255)
+  mimeType       String   @map("mime_type") @db.VarChar(100)
+  size           BigInt
+  url            String   @db.Text
+  createdById    BigInt?  @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdById], references: [id])
+
+  @@index([organizationId])
+  @@map("media")
+}
+
+/// DND — numbers that have opted out / been blocked from receiving messages
+model DndEntry {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @map("organization_id")
+  number         String   @db.VarChar(30)
+  message        String?  @db.VarChar(255) // reason / keyword that triggered the DND, e.g. "Stop"
+  createdAt      DateTime @default(now()) @map("added_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, number])
+  @@index([organizationId])
+  @@map("dnd_entries")
+}
+
+/// Automation Studio — event-based / scheduled workflows (trigger + steps)
+model AutomationWorkflow {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  name           String    @db.VarChar(150)
+  status         String    @default("draft") @db.VarChar(20) // draft, active, paused
+  triggerType    String?   @map("trigger_type") @db.VarChar(50)
+  triggerConfig  Json?     @map("trigger_config")
+  steps          Json?     // ordered array of step definitions
+  lastRunAt      DateTime? @map("last_run_at")
+  createdById    BigInt?   @map("created_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdById], references: [id])
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("automation_workflows")
+}
+
+/// WhatsApp Flows — Meta Flow builder (screens-based interactive forms)
+model WhatsappFlow {
+  id             BigInt    @id @default(autoincrement())
+  organizationId BigInt    @map("organization_id")
+  flowRef        String    @unique @map("flow_ref") @db.VarChar(60)
+  name           String    @db.VarChar(150)
+  category       String    @default("OTHER") @db.VarChar(50)
+  status         String    @default("draft") @db.VarChar(20) // draft, published, deprecated
+  healthStatus   String    @default("healthy") @map("health_status") @db.VarChar(20)
+  screens        Json?
+  createdById    BigInt?   @map("created_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdById], references: [id])
+
+  @@index([organizationId])
+  @@map("whatsapp_flows")
+}
+
+/// Segments — condition-based dynamic grouping of contacts
+model Segment {
+  id             BigInt   @id @default(autoincrement())
+  organizationId BigInt   @map("organization_id")
+  name           String   @db.VarChar(150)
+  filters        Json?    // Condition rules array: [{ field, operator, value }]
+  contactCount   Int      @default(0) @map("contact_count")
+  createdById    BigInt?  @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdById], references: [id])
+
+  @@index([organizationId])
+  @@map("segments")
+}

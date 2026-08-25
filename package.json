@@ -1,0 +1,15 @@
+{
+  "name": "whatsapp-wiz",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Whatsapp Wiz - Multi-tenant WhatsApp Business API platform",
+  "scripts": {
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "setup:backend": "npm --prefix backend install && npm --prefix backend run db:setup",
+    "setup:frontend": "npm --prefix frontend install",
+    "dev:backend": "npm --prefix backend run start:dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build"
+  }
+}

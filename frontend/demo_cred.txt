@@ -1,0 +1,17 @@
+Demo Accounts Credentials:
+
+Admin
+Email: admin@demo.com
+Password: Admin@123
+
+Supervisor
+Email: supervisor@demo.com
+Password: Supervisor@123
+
+Agent
+Email: agent@demo.com
+Password: Agent@123
+
+Reseller
+Email: reseller@demo.com
+Password: Reseller@123
