@@ -15,12 +15,7 @@ export class WalletService {
     });
     if (!wallet) {
       wallet = await this.prisma.wallet.create({
-        data: { organizationId: BigInt(organizationId), balance: 10000.00 },
-      });
-    } else if (Number(wallet.balance) <= 0) {
-      wallet = await this.prisma.wallet.update({
-        where: { id: wallet.id },
-        data: { balance: 10000.00 },
+        data: { organizationId: BigInt(organizationId), balance: 0.00 },
       });
     }
     return wallet;
