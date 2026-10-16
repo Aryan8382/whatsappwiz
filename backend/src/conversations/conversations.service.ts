@@ -103,24 +103,60 @@ export class ConversationsService {
     return { ...rest, unreadCount: _count?.messages ?? 0, labels: labels.map((l) => l.label) };
   }
 
-  async assign(organizationId: number, id: number, agentId?: number | null) {
+  async assign(organizationId: number, id: number, agentId?: number | null, agentName?: string | null) {
     const conversation = await this.findOwned(organizationId, id);
-    if (!agentId) {
+
+    // If agentName provided but no valid agentId, resolve user from DB
+    if ((!agentId || agentId <= 0) && agentName && agentName.trim().length > 0) {
+      const clean = agentName.trim().toLowerCase();
+      const candidate = await this.prisma.user.findFirst({
+        where: {
+          organizationId: BigInt(organizationId),
+          OR: [
+            { firstName: { contains: clean } },
+            { lastName: { contains: clean } },
+            { email: { contains: clean } },
+          ],
+        },
+      });
+      if (candidate) {
+        agentId = Number(candidate.id);
+      }
+    }
+
+    // Unassign if agentId is missing, 0, or null
+    if (!agentId || agentId <= 0) {
       const updated = await this.prisma.conversation.update({
         where: { id: conversation.id },
         data: { assignedAgentId: null },
+        include: {
+          contact: true,
+          assignedAgent: { select: { id: true, firstName: true, lastName: true } },
+          whatsappNumber: { select: { id: true, phoneNumber: true, displayName: true } },
+          messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+          labels: { include: { label: true } },
+        },
       });
       this.realtime.emitToOrg(organizationId, 'conversation:updated', updated);
       this.webhooks.dispatch(organizationId, 'conversation.assigned', updated);
       return updated;
     }
+
     const agent = await this.prisma.user.findFirst({
       where: { id: BigInt(agentId), organizationId: BigInt(organizationId) },
     });
     if (!agent) throw new BadRequestException('Agent not found in this organization');
+
     const updated = await this.prisma.conversation.update({
       where: { id: conversation.id },
       data: { assignedAgentId: BigInt(agentId), status: 'open' },
+      include: {
+        contact: true,
+        assignedAgent: { select: { id: true, firstName: true, lastName: true } },
+        whatsappNumber: { select: { id: true, phoneNumber: true, displayName: true } },
+        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        labels: { include: { label: true } },
+      },
     });
     this.realtime.emitToOrg(organizationId, 'conversation:updated', updated);
     this.webhooks.dispatch(organizationId, 'conversation.assigned', updated);

@@ -1,8 +1,13 @@
 import { IsNumber, IsOptional, IsString } from 'class-validator';
 
 export class AssignDto {
+  @IsOptional()
   @IsNumber()
-  agentId: number;
+  agentId?: number | null;
+
+  @IsOptional()
+  @IsString()
+  agentName?: string | null;
 }
 
 export class NoteDto {

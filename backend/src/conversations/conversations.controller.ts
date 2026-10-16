@@ -61,7 +61,7 @@ export class ConversationsController {
     @Param('id') id: string,
     @Body() dto: AssignDto,
   ) {
-    return this.conversations.assign(user.organizationId, +id, dto.agentId);
+    return this.conversations.assign(user.organizationId, +id, dto.agentId, dto.agentName);
   }
 
   @Post(':id/transfer')
