@@ -4,6 +4,32 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { WebhookDispatchService } from '../webhooks/webhook-dispatch.service';
 import { BotEngineService } from './bot-engine.service';
 
+export function getPhoneVariants(phone: string): string[] {
+  const digits = (phone || '').replace(/\D/g, '');
+  if (!digits) return [];
+  const variants = new Set<string>();
+  variants.add(digits);
+  variants.add(`+${digits}`);
+  if (digits.length === 10) {
+    variants.add(`91${digits}`);
+    variants.add(`+91${digits}`);
+    variants.add(`0${digits}`);
+  }
+  if (digits.length === 12 && digits.startsWith('91')) {
+    const without91 = digits.slice(2);
+    variants.add(without91);
+    variants.add(`+${without91}`);
+    variants.add(`0${without91}`);
+  }
+  if (digits.length === 11 && digits.startsWith('0')) {
+    const without0 = digits.slice(1);
+    variants.add(without0);
+    variants.add(`91${without0}`);
+    variants.add(`+91${without0}`);
+  }
+  return Array.from(variants);
+}
+
 @Injectable()
 export class WebhookReceiverService {
   private readonly logger = new Logger(WebhookReceiverService.name);
@@ -154,17 +180,14 @@ export class WebhookReceiverService {
     }
 
     // Requirement 4: CONTACT MANAGEMENT
-    // Normalize to digits-only (no '+') and match against EITHER format,
-    // since existing rows may have been saved with or without '+'.
-    // This prevents creating duplicate contacts like "+917016526746" and
-    // "917016526746" for the same person.
+    // Normalize to digits-only and match against ALL phone variants (with/without +91, with/without +, 10-digit).
+    const variants = getPhoneVariants(params.from);
     const digitsOnly = params.from.replace(/\D/g, '');
-    const withPlus = `+${digitsOnly}`;
 
     let contact = await this.prisma.contact.findFirst({
       where: {
         organizationId: BigInt(params.organizationId),
-        mobile: { in: [digitsOnly, withPlus] },
+        mobile: { in: variants },
       },
     });
     if (!contact) {
@@ -248,17 +271,26 @@ export class WebhookReceiverService {
     await this.prisma.contact.update({
       where: { id: contact.id },
       data: { lastInteraction: new Date() },
-    });
+    }).catch(() => {});
+
+    await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { updatedAt: new Date() },
+    }).catch(() => {});
 
     this.realtime.emitToOrg(params.organizationId, 'message:new', message);
     this.webhooks.dispatch(params.organizationId, 'message.received', message);
 
     // Requirement 7: CHATBOT - Trigger existing Bot Engine
-    await this.botEngine.handleIncoming(
-      params.organizationId,
-      Number(conversation.id),
-      params.text || '',
-    );
+    try {
+      await this.botEngine.handleIncoming(
+        params.organizationId,
+        Number(conversation.id),
+        params.text || '',
+      );
+    } catch (botErr: any) {
+      this.logger.error(`Bot engine error on incoming message: ${botErr.message}`, botErr.stack);
+    }
 
     return message;
   }

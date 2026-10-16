@@ -45,12 +45,18 @@ export class TemplatesService {
         let headerText: string | null = null;
         let bodyText = '';
         let footerText: string | null = null;
+        let buttonsData: string | null = null;
 
         if (Array.isArray(t.components)) {
           for (const comp of t.components) {
-            if (comp.type === 'HEADER' && comp.text) headerText = comp.text;
+            if (comp.type === 'HEADER') {
+              headerText = comp.text || (comp.format ? `[${comp.format}]` : null);
+            }
             if (comp.type === 'BODY' && comp.text) bodyText = comp.text;
             if (comp.type === 'FOOTER' && comp.text) footerText = comp.text;
+            if (comp.type === 'BUTTONS' && Array.isArray(comp.buttons)) {
+              buttonsData = JSON.stringify(comp.buttons);
+            }
           }
         }
 
@@ -74,9 +80,10 @@ export class TemplatesService {
               category,
               language,
               status,
-              header: headerText,
+              header: headerText || existing.header,
               body: bodyText,
-              footer: footerText,
+              footer: footerText || existing.footer,
+              buttons: buttonsData || existing.buttons,
               metaTemplateId: t.id ? String(t.id) : existing.metaTemplateId,
             },
           });
@@ -91,11 +98,15 @@ export class TemplatesService {
               header: headerText,
               body: bodyText,
               footer: footerText,
+              buttons: buttonsData,
               metaTemplateId: t.id ? String(t.id) : null,
             },
           });
         }
         syncedCount++;
+      }
+      if (syncedCount > 0) {
+        this.realtime.emitToOrg(organizationId, 'template:synced', { count: syncedCount });
       }
       return { success: true, count: syncedCount, total: remote.length };
     } catch (err: any) {
@@ -132,6 +143,12 @@ export class TemplatesService {
       throw new BadRequestException('Template body is required');
     }
     const cleanName = dto.name.toLowerCase().replace(/[^\w]/g, '_');
+    const buttonsStr = dto.buttons
+      ? typeof dto.buttons === 'string'
+        ? dto.buttons
+        : JSON.stringify(dto.buttons)
+      : null;
+
     const created = await this.prisma.template.create({
       data: {
         organizationId: BigInt(organizationId),
@@ -141,18 +158,21 @@ export class TemplatesService {
         header: dto.header || null,
         body: dto.body,
         footer: dto.footer || null,
+        buttons: buttonsStr,
         status: 'draft',
       },
     });
 
     // Auto submit to Meta API for approval
     try {
-      await this.submit(organizationId, Number(created.id));
+      await this.submit(organizationId, Number(created.id), dto.headerMediaUrl);
     } catch (err: any) {
       // Keep template in DB so user can inspect error/rejection details
     }
 
-    return this.findOwned(organizationId, Number(created.id));
+    const result = await this.findOwned(organizationId, Number(created.id));
+    this.realtime.emitToOrg(organizationId, 'template:new', result);
+    return result;
   }
 
   async update(organizationId: number, id: number, dto: UpdateTemplateDto) {
@@ -160,6 +180,13 @@ export class TemplatesService {
     if (!['draft', 'rejected'].includes(template.status)) {
       throw new BadRequestException('Only draft or rejected templates can be edited');
     }
+    const buttonsStr =
+      dto.buttons !== undefined
+        ? typeof dto.buttons === 'string'
+          ? dto.buttons
+          : JSON.stringify(dto.buttons)
+        : undefined;
+
     return this.prisma.template.update({
       where: { id: template.id },
       data: {
@@ -169,15 +196,23 @@ export class TemplatesService {
         header: dto.header !== undefined ? dto.header : undefined,
         body: dto.body !== undefined ? dto.body : undefined,
         footer: dto.footer !== undefined ? dto.footer : undefined,
+        buttons: buttonsStr,
         status: 'draft',
       },
     });
   }
 
-  async submit(organizationId: number, id: number) {
+  async submit(organizationId: number, id: number, headerMediaUrl?: string) {
     const template = await this.findOwned(organizationId, id);
     if (template.status === 'approved') {
       throw new BadRequestException('Template is already approved');
+    }
+
+    let parsedButtons: any[] = [];
+    if (template.buttons) {
+      try {
+        parsedButtons = typeof template.buttons === 'string' ? JSON.parse(template.buttons) : template.buttons;
+      } catch {}
     }
 
     // Try to submit via The Messenger API's create_template endpoint
@@ -192,8 +227,10 @@ export class TemplatesService {
         category: template.category,
         language: template.language || 'en',
         header: template.header,
+        headerMediaUrl,
         body: template.body,
         footer: template.footer,
+        buttons: parsedButtons,
       });
 
       if (res.success) {

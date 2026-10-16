@@ -38,7 +38,7 @@ export class ConversationsService {
       };
     }
     const page = opts.page || 1;
-    const limit = opts.limit || 20;
+    const limit = opts.limit || 50;
     const [items, total] = await Promise.all([
       this.prisma.conversation.findMany({
         where,
@@ -48,7 +48,16 @@ export class ConversationsService {
           whatsappNumber: { select: { id: true, phoneNumber: true, displayName: true } },
           messages: { orderBy: { createdAt: 'desc' }, take: 1 },
           labels: { include: { label: true } },
-          _count: { select: { messages: true } },
+          _count: {
+            select: {
+              messages: {
+                where: {
+                  senderType: 'customer',
+                  readAt: null,
+                },
+              },
+            },
+          },
         },
         orderBy: { updatedAt: 'desc' },
         skip: (page - 1) * limit,
@@ -57,8 +66,9 @@ export class ConversationsService {
       this.prisma.conversation.count({ where }),
     ]);
     return {
-      items: items.map(({ labels, ...c }) => ({
+      items: items.map(({ labels, _count, ...c }) => ({
         ...c,
+        unreadCount: _count?.messages ?? 0,
         labels: labels.map((l) => l.label),
       })),
       total,
@@ -76,15 +86,34 @@ export class ConversationsService {
         whatsappNumber: true,
         labels: { include: { label: true } },
         notes: { include: { user: { select: { id: true, firstName: true, lastName: true } } }, orderBy: { createdAt: 'desc' } },
+        _count: {
+          select: {
+            messages: {
+              where: {
+                senderType: 'customer',
+                readAt: null,
+              },
+            },
+          },
+        },
       },
     });
     if (!conversation) throw new NotFoundException('Conversation not found');
-    const { labels, ...rest } = conversation;
-    return { ...rest, labels: labels.map((l) => l.label) };
+    const { labels, _count, ...rest } = conversation;
+    return { ...rest, unreadCount: _count?.messages ?? 0, labels: labels.map((l) => l.label) };
   }
 
-  async assign(organizationId: number, id: number, agentId: number) {
+  async assign(organizationId: number, id: number, agentId?: number | null) {
     const conversation = await this.findOwned(organizationId, id);
+    if (!agentId) {
+      const updated = await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { assignedAgentId: null },
+      });
+      this.realtime.emitToOrg(organizationId, 'conversation:updated', updated);
+      this.webhooks.dispatch(organizationId, 'conversation.assigned', updated);
+      return updated;
+    }
     const agent = await this.prisma.user.findFirst({
       where: { id: BigInt(agentId), organizationId: BigInt(organizationId) },
     });
@@ -98,7 +127,7 @@ export class ConversationsService {
     return updated;
   }
 
-  async transfer(organizationId: number, id: number, agentId: number) {
+  async transfer(organizationId: number, id: number, agentId?: number | null) {
     return this.assign(organizationId, id, agentId);
   }
 

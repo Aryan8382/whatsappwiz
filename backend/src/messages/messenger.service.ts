@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
+import { extname, join } from 'path';
 
 export interface MessengerSendResult {
   metaMessageId: string;
@@ -9,7 +11,7 @@ export interface MessengerSendResult {
   error?: string;
 }
 
-export type BotButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER';
+export type BotButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER' | 'LOCATION';
 
 export interface BotButton {
   id?: string;
@@ -21,8 +23,7 @@ export interface BotButton {
 /**
  * A media header (image/video/document) that can be attached directly to
  * a WhatsApp interactive message (buttons or CTA URL), so the media,
- * body text, and buttons all arrive as ONE message/bubble instead of a
- * media message followed by a separate button message.
+ * body text, and buttons all arrive as ONE message/bubble.
  */
 export interface BotHeaderMedia {
   type: 'image' | 'video' | 'document';
@@ -30,109 +31,91 @@ export interface BotHeaderMedia {
   filename?: string; // only used for document headers
 }
 
+/**
+ * Meta WhatsApp Cloud API integration.
+ *
+ * Required env vars:
+ *   MESSENGER_API_BASE_URL    e.g. https://graph.facebook.com/v25.0
+ *   MESSENGER_API_KEY         permanent System User access token
+ *   MESSENGER_WABA_ID         WhatsApp Business Account ID
+ *   MESSENGER_PHONE_NUMBER_ID Phone Number ID (used for sending + media)
+ *   META_APP_SECRET           (optional) used to verify webhook signatures
+ */
 @Injectable()
 export class MessengerService implements OnModuleInit {
   private readonly logger = new Logger(MessengerService.name);
 
-  private fetchedWabaId: string | null = null;
-
   constructor(private config: ConfigService) {}
 
   async onModuleInit() {
-    this.logger.log(`Initializing Messenger API integration...`);
+    this.logger.log('Initializing Meta WhatsApp Cloud API integration...');
+
     if (!this.apiKey) {
       this.logger.warn(
-        `MESSENGER_API_KEY is not configured in backend/.env. API calls will run in fallback mode.`,
+        'MESSENGER_API_KEY is not configured. API calls will run in fallback mode.',
       );
       return;
     }
-    this.logger.log(
-      `MESSENGER_API_KEY configured (length: ${this.apiKey.length}). Validating token with Messenger API...`,
-    );
-
-    // Auto-discover real WABA ID if environment variable is set to placeholder
-    if (!this.fetchedWabaId) {
-      try {
-        const usersRes = await this.listUsers('waba_users');
-        const wabaUsers = usersRes?.data?.[0] || usersRes?.data || [];
-        const firstWaba = Array.isArray(wabaUsers) ? wabaUsers[0] : wabaUsers;
-        if (firstWaba?.whatsapp_business_account_id) {
-          this.fetchedWabaId = String(firstWaba.whatsapp_business_account_id);
-          this.logger.log(
-            `✅ Auto-discovered WABA ID from Messenger API: ${this.fetchedWabaId}`,
-          );
-        } else {
-          this.logger.warn(
-            `MESSENGER_WABA_ID is set to placeholder. x-waba-id header will not be sent.`,
-          );
-        }
-      } catch (err: any) {
-        this.logger.warn(`Could not auto-discover WABA ID: ${err.message}`);
-      }
+    if (!this.phoneNumberId) {
+      this.logger.warn('MESSENGER_PHONE_NUMBER_ID is not configured. Sending will fail.');
+    }
+    if (!this.wabaId) {
+      this.logger.warn('MESSENGER_WABA_ID is not configured. Template APIs will fail.');
     }
 
     try {
-      const res = await fetch(`${this.baseUrl}/get_templates?limit=1`, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
+      const res = await fetch(
+        `${this.baseUrl}/${this.phoneNumberId}?fields=display_phone_number,verified_name,quality_rating`,
+        { method: 'GET', headers: this.getHeaders() },
+      );
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        this.logger.log(`✅ Messenger API connection SUCCESSFUL. Token is active and valid.`);
+        this.logger.log(
+          `✅ Meta connection OK. Number: ${data.display_phone_number} (${data.verified_name}), quality: ${data.quality_rating}`,
+        );
       } else {
         this.logger.error(
-          `❌ Messenger API Token Validation FAILED (${res.status}): ${data.message || data.error || JSON.stringify(data)}. Please check MESSENGER_API_KEY in backend/.env`,
+          `❌ Meta token/phone-number validation FAILED (${res.status}): ${data?.error?.message || JSON.stringify(data)}`,
         );
       }
     } catch (err: any) {
-      this.logger.error(
-        `Messenger API connection check error: ${err.message}`,
-      );
+      this.logger.error(`Meta connection check error: ${err.message}`);
     }
   }
+
+  // ==========================================
+  // CONFIG HELPERS
+  // ==========================================
 
   private get baseUrl(): string {
     return (
       this.config.get<string>('MESSENGER_API_BASE_URL') ||
-      'https://live.themessenger.app/api'
+      'https://graph.facebook.com/v25.0'
     ).replace(/\/+$/, '');
   }
 
   private get apiKey(): string {
-    return (
-      this.config.get<string>('MESSENGER_API_KEY') ||
-      ''
-    );
+    return this.config.get<string>('MESSENGER_API_KEY') || '';
   }
 
   private get wabaId(): string {
-    const envWaba = this.config.get<string>('MESSENGER_WABA_ID') || '';
-    if (envWaba && envWaba !== 'YOUR_WABA_ID') {
-      return envWaba;
-    }
-    return this.fetchedWabaId || '';
+    return this.config.get<string>('MESSENGER_WABA_ID') || '';
   }
 
-  private get conversationsPath(): string {
-    return (
-      this.config.get<string>('MESSENGER_CONVERSATIONS_PATH') ||
-      '/conversations'
-    );
+  private get phoneNumberId(): string {
+    return this.config.get<string>('MESSENGER_PHONE_NUMBER_ID') || '';
   }
 
-  private getHeaders(contentType: string | null = 'application/json'): Record<string, string> {
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-    };
-    if (contentType) {
-      headers['Content-Type'] = contentType;
-    }
-    if (this.apiKey) {
-      headers['Authorization'] = `Bearer ${this.apiKey}`;
-    }
-    if (this.wabaId && this.wabaId !== 'YOUR_WABA_ID') {
-      headers['x-waba-id'] = this.wabaId;
-    }
+  private get appSecret(): string {
+    return this.config.get<string>('META_APP_SECRET') || '';
+  }
+
+  private getHeaders(
+    contentType: string | null = 'application/json',
+  ): Record<string, string> {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (contentType) headers['Content-Type'] = contentType;
+    if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
     return headers;
   }
 
@@ -141,16 +124,35 @@ export class MessengerService implements OnModuleInit {
     if (clean.startsWith('0') && clean.length === 11) {
       clean = clean.substring(1);
     }
+    // Prevent double country code like 91917283805939
+    if (clean.startsWith('9191') && clean.length === 14) {
+      clean = clean.substring(2);
+    }
     if (clean.length === 10) {
       clean = `91${clean}`;
     }
     return clean;
   }
 
+  private extractError(responseData: any, status: number): string {
+    const e = responseData?.error;
+    if (e && typeof e === 'object') {
+      const details = e.error_data?.details;
+      return (
+        e.error_user_msg ||
+        [e.message, details].filter(Boolean).join(' - ') ||
+        JSON.stringify(e)
+      );
+    }
+    if (typeof e === 'string') return e;
+    return (
+      responseData?.message ||
+      `Meta API error (HTTP ${status}): ${JSON.stringify(responseData)}`
+    );
+  }
+
   /**
-   * Builds the `interactive.header` object for a media header (image,
-   * video, or document) so it can be attached to an interactive
-   * button/CTA message alongside body text and buttons.
+   * Builds the `interactive.header` object for a media header.
    */
   private buildMediaHeader(media: BotHeaderMedia): any {
     if (media.type === 'document') {
@@ -169,204 +171,326 @@ export class MessengerService implements OnModuleInit {
   }
 
   /**
+   * Verify the X-Hub-Signature-256 header on an incoming Meta webhook.
+   * `rawBody` must be the exact raw request body (Buffer or string),
+   * not the parsed JSON. Enable `rawBody: true` in NestFactory.create().
+   */
+  verifyWebhookSignature(rawBody: Buffer | string, signatureHeader?: string): boolean {
+    if (!this.appSecret) {
+      this.logger.warn('META_APP_SECRET not set; skipping webhook signature verification.');
+      return true;
+    }
+    if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
+    const expected = createHmac('sha256', this.appSecret).update(rawBody).digest('hex');
+    const received = signatureHeader.slice('sha256='.length);
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(received, 'hex');
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  /**
    * Status & Connectivity check
    */
   async getStatus(): Promise<{ tokenValid: boolean; wabaId?: string; baseUrl: string }> {
     try {
-      const res = await fetch(`${this.baseUrl}/get_templates?limit=1`, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
+      const res = await fetch(
+        `${this.baseUrl}/${this.phoneNumberId}?fields=display_phone_number`,
+        { method: 'GET', headers: this.getHeaders() },
+      );
       return { tokenValid: res.ok, wabaId: this.wabaId, baseUrl: this.baseUrl };
-    } catch (err: any) {
+    } catch {
       return { tokenValid: false, wabaId: this.wabaId, baseUrl: this.baseUrl };
     }
   }
 
   // ==========================================
-  // 1. USER APIS (/api/users)
+  // 1. USER APIS
+  // Meta has no equivalent of the old "users" endpoints. Kept as
+  // compatibility stubs so existing callers don't crash.
   // ==========================================
 
-  /**
-   * List users / businesses / WABA users
-   * GET /users?user_type=business | waba_users
-   */
-  async listUsers(userType?: 'business' | 'waba_users' | string): Promise<any> {
-    let url = `${this.baseUrl}/users`;
-    if (userType) {
-      url += `?user_type=${encodeURIComponent(userType)}`;
-    }
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: this.getHeaders(),
-    });
-    return res.json();
+  async listUsers(_userType?: 'business' | 'waba_users' | string): Promise<any> {
+    return {
+      data: this.wabaId ? [{ whatsapp_business_account_id: this.wabaId }] : [],
+    };
   }
 
-  /**
-   * Create Business User
-   * POST /users (form-data: user_type: business, name, email, company_name, phone, webhook_forwarding_url)
-   */
-  async createBusinessUser(data: {
-    name: string;
-    email: string;
-    company_name: string;
-    phone?: string;
-    webhook_forwarding_url?: string;
-  }): Promise<any> {
-    const formData = new FormData();
-    formData.append('user_type', 'business');
-    formData.append('name', data.name);
-    formData.append('email', data.email);
-    formData.append('company_name', data.company_name);
-    if (data.phone) formData.append('phone', data.phone);
-    if (data.webhook_forwarding_url) formData.append('webhook_forwarding_url', data.webhook_forwarding_url);
-
-    const res = await fetch(`${this.baseUrl}/users`, {
-      method: 'POST',
-      headers: this.getHeaders(null),
-      body: formData as any,
-    });
-    return res.json();
+  async createBusinessUser(_data: any): Promise<any> {
+    return {
+      success: false,
+      error: 'createBusinessUser is not supported on Meta Cloud API. Manage accounts in Meta Business Manager.',
+    };
   }
 
-  /**
-   * Create WABA User
-   * POST /users (form-data: user_type: waba_user, name, email, currencies, phone, webhook_forwarding_url)
-   */
-  async createWabaUser(data: {
-    name: string;
-    email: string;
-    currencies?: string;
-    phone: string;
-    webhook_forwarding_url?: string;
-  }): Promise<any> {
-    const formData = new FormData();
-    formData.append('user_type', 'waba_user');
-    formData.append('name', data.name);
-    formData.append('email', data.email);
-    formData.append('currencies', data.currencies || 'INR');
-    formData.append('phone', this.sanitizePhoneNumber(data.phone));
-    if (data.webhook_forwarding_url) formData.append('webhook_forwarding_url', data.webhook_forwarding_url);
-
-    const res = await fetch(`${this.baseUrl}/users`, {
-      method: 'POST',
-      headers: this.getHeaders(null),
-      body: formData as any,
-    });
-    return res.json();
+  async createWabaUser(_data: any): Promise<any> {
+    return {
+      success: false,
+      error: 'createWabaUser is not supported on Meta Cloud API. Manage accounts in Meta Business Manager.',
+    };
   }
 
   // ==========================================
-  // 2. CONVERSATIONS APIS (/api/conversations)
+  // 2. CONVERSATIONS
+  // Meta has no "list conversations" endpoint. Messages must be stored in
+  // your own database from webhook events (inbound) and send results
+  // (outbound). This returns an empty shape so existing callers still work.
   // ==========================================
 
-  /**
-   * Fetch conversation history
-   * GET /conversations?phone_number=...&page=...
-   */
-  async getConversations(phoneNumber?: string, page?: number): Promise<any> {
-    const path = this.conversationsPath.startsWith('/') ? this.conversationsPath : `/${this.conversationsPath}`;
-    const params = new URLSearchParams();
-    if (phoneNumber) {
-      params.append('phone_number', this.sanitizePhoneNumber(phoneNumber));
-    }
-    if (page) {
-      params.append('page', String(page));
-    }
-    const query = params.toString();
-    const url = `${this.baseUrl}${path}${query ? `?${query}` : ''}`;
-
-    try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error(`Failed to fetch conversations (${res.status})`);
-      }
-      return await res.json();
-    } catch (err: any) {
-      this.logger.error(`getConversations error: ${err.message}`);
-      return { data: { messsages: [] } };
-    }
+  async getConversations(_phoneNumber?: string, _page?: number): Promise<any> {
+    return { data: { messsages: [] } };
   }
 
   // ==========================================
-  // 3. TEMPLATES APIS (/api/get_templates)
+  // 3. TEMPLATES
+  // GET/POST /{WABA_ID}/message_templates
   // ==========================================
 
-  /**
-   * Get Templates from Messenger API
-   * GET /get_templates
-   */
   async getTemplates(limit: number = 1000): Promise<any> {
-    const url = `${this.baseUrl}/get_templates?limit=${limit}`;
+    if (!this.wabaId) {
+      this.logger.error('getTemplates: MESSENGER_WABA_ID is not set');
+      return { data: [] };
+    }
+    const all: any[] = [];
+    let after: string | undefined;
+    const pageSize = 100;
+
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error(`Failed to fetch templates (${res.status})`);
+      while (all.length < limit) {
+        const params = new URLSearchParams({
+          limit: String(Math.min(pageSize, limit - all.length)),
+          fields: 'id,name,status,category,language,components,rejected_reason',
+        });
+        if (after) params.set('after', after);
+
+        const res = await fetch(
+          `${this.baseUrl}/${this.wabaId}/message_templates?${params.toString()}`,
+          { method: 'GET', headers: this.getHeaders() },
+        );
+        const json: any = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(this.extractError(json, res.status));
+        }
+        all.push(...(json.data || []));
+        after = json?.paging?.cursors?.after;
+        if (!json?.paging?.next || !after) break;
       }
-      return await res.json();
+      return { data: all };
     } catch (err: any) {
       this.logger.error(`getTemplates error: ${err.message}`);
       return { data: [] };
     }
   }
 
+  /** Meta requires sample values for every {{n}} variable. */
+  private sampleValues(text: string): string[] {
+    const nums = [...text.matchAll(/\{\{(\d+)\}\}/g)].map((m) => Number(m[1]));
+    const max = nums.length ? Math.max(...nums) : 0;
+    return Array.from({ length: max }, (_, i) => `sample${i + 1}`);
+  }
+
+  /**
+   * Upload sample media to Meta Resumable Upload API to obtain header_handle
+   * Required by Meta for message templates with IMAGE, VIDEO, or DOCUMENT headers.
+   */
+  async uploadMediaHandle(mediaUrlOrPath: string, mediaType: 'IMAGE' | 'VIDEO' | 'DOCUMENT'): Promise<string | null> {
+    try {
+      if (!this.apiKey) return null;
+
+      let fileBuffer: Buffer | null = null;
+      let mimeType = mediaType === 'IMAGE' ? 'image/jpeg' : mediaType === 'VIDEO' ? 'video/mp4' : 'application/pdf';
+
+      // 1. Check local file system
+      let localPath = '';
+      if (mediaUrlOrPath.includes('/uploads/')) {
+        const filename = mediaUrlOrPath.split('/uploads/')[1].split('?')[0];
+        localPath = join(process.cwd(), 'uploads', filename);
+      } else if (existsSync(mediaUrlOrPath)) {
+        localPath = mediaUrlOrPath;
+      }
+
+      if (localPath && existsSync(localPath)) {
+        fileBuffer = readFileSync(localPath);
+        const ext = extname(localPath).toLowerCase();
+        if (ext === '.png') mimeType = 'image/png';
+        else if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+        else if (ext === '.mp4') mimeType = 'video/mp4';
+        else if (ext === '.pdf') mimeType = 'application/pdf';
+      } else if (/^https?:\/\//i.test(mediaUrlOrPath)) {
+        const fRes = await fetch(mediaUrlOrPath);
+        if (fRes.ok) {
+          const ab = await fRes.arrayBuffer();
+          fileBuffer = Buffer.from(ab);
+          const ct = fRes.headers.get('content-type');
+          if (ct) mimeType = ct;
+        }
+      }
+
+      if (!fileBuffer || fileBuffer.length === 0) {
+        this.logger.warn(`No sample file buffer resolved for ${mediaUrlOrPath}`);
+        return null;
+      }
+
+      // 2. Discover Meta App ID
+      let appId = this.config.get<string>('META_APP_ID');
+      if (!appId) {
+        const appRes = await fetch(`${this.baseUrl}/app?fields=id`, {
+          headers: this.getHeaders(),
+        });
+        const appData = await appRes.json().catch(() => ({}));
+        if (appData?.id) appId = appData.id;
+      }
+      if (!appId) {
+        this.logger.warn('Could not determine Meta App ID for resumable upload.');
+        return null;
+      }
+
+      // 3. Initiate Upload Session on POST /{app_id}/uploads
+      const sessionUrl = `${this.baseUrl}/${appId}/uploads?file_length=${fileBuffer.length}&file_type=${encodeURIComponent(mimeType)}`;
+      const sessionRes = await fetch(sessionUrl, {
+        method: 'POST',
+        headers: this.getHeaders('application/json'),
+      });
+      const sessionData = await sessionRes.json().catch(() => ({}));
+      const uploadSessionId = sessionData?.id;
+      if (!uploadSessionId) {
+        this.logger.warn(`Failed to create Meta upload session: ${JSON.stringify(sessionData)}`);
+        return null;
+      }
+
+      // 4. Upload raw file chunks to POST /{upload_session_id}
+      const chunkUrl = `${this.baseUrl}/${uploadSessionId}`;
+      const chunkRes = await fetch(chunkUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `OAuth ${this.apiKey}`,
+          file_offset: '0',
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Uint8Array(fileBuffer),
+      });
+      const chunkData = await chunkRes.json().catch(() => ({}));
+      if (chunkData?.h) {
+        this.logger.log(`✅ Uploaded sample media to Meta Resumable API! Header Handle: ${chunkData.h}`);
+        return chunkData.h;
+      }
+      this.logger.warn(`Resumable upload did not return handle h: ${JSON.stringify(chunkData)}`);
+      return null;
+    } catch (err: any) {
+      this.logger.error(`Error in uploadMediaHandle: ${err.message}`);
+      return null;
+    }
+  }
+
   /**
    * Submit New Template for Meta Approval
-   * POST /create_template
+   * POST /{WABA_ID}/message_templates
    */
   async createTemplate(data: {
     name: string;
     category: string;
     language: string;
     header?: string | null;
+    headerMediaUrl?: string | null;
     body: string;
     footer?: string | null;
     buttons?: any[];
   }): Promise<{ success: boolean; data?: any; error?: string }> {
-    const cleanName = data.name.toLowerCase().replace(/[^\w]/g, '_');
+    if (!this.wabaId) {
+      return { success: false, error: 'MESSENGER_WABA_ID is not configured' };
+    }
+
+    const cleanName = data.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
     const components: any[] = [];
 
     if (data.header && data.header.trim()) {
-      components.push({
-        type: 'HEADER',
-        format: 'TEXT',
-        text: data.header.trim(),
-      });
+      const headerText = data.header.trim();
+      const upper = headerText.toUpperCase();
+      if (upper === '[IMAGE]' || upper === 'IMAGE') {
+        let handle: string | null = null;
+        if (data.headerMediaUrl) {
+          handle = await this.uploadMediaHandle(data.headerMediaUrl, 'IMAGE');
+        }
+        components.push({
+          type: 'HEADER',
+          format: 'IMAGE',
+          ...(handle ? { example: { header_handle: [handle] } } : {}),
+        });
+      } else if (upper === '[VIDEO]' || upper === 'VIDEO') {
+        let handle: string | null = null;
+        if (data.headerMediaUrl) {
+          handle = await this.uploadMediaHandle(data.headerMediaUrl, 'VIDEO');
+        }
+        components.push({
+          type: 'HEADER',
+          format: 'VIDEO',
+          ...(handle ? { example: { header_handle: [handle] } } : {}),
+        });
+      } else if (upper === '[DOCUMENT]' || upper === 'DOCUMENT') {
+        let handle: string | null = null;
+        if (data.headerMediaUrl) {
+          handle = await this.uploadMediaHandle(data.headerMediaUrl, 'DOCUMENT');
+        }
+        components.push({
+          type: 'HEADER',
+          format: 'DOCUMENT',
+          ...(handle ? { example: { header_handle: [handle] } } : {}),
+        });
+      } else {
+        const headerSamples = this.sampleValues(headerText);
+        components.push({
+          type: 'HEADER',
+          format: 'TEXT',
+          text: headerText,
+          ...(headerSamples.length ? { example: { header_text: [headerSamples[0]] } } : {}),
+        });
+      }
     }
 
+    const bodyText = data.body.trim();
+    const bodySamples = this.sampleValues(bodyText);
     components.push({
       type: 'BODY',
-      text: data.body.trim(),
+      text: bodyText,
+      ...(bodySamples.length ? { example: { body_text: [bodySamples] } } : {}),
     });
 
     if (data.footer && data.footer.trim()) {
-      components.push({
-        type: 'FOOTER',
-        text: data.footer.trim(),
-      });
+      components.push({ type: 'FOOTER', text: data.footer.trim() });
     }
 
     if (data.buttons && data.buttons.length > 0) {
       const formattedBtns = data.buttons.map((b) => {
         if (b.type === 'URL') {
-          return { type: 'URL', text: b.text, url: b.value };
+          let urlVal = String(b.value || b.url || '').trim();
+          if (!/^https?:\/\//i.test(urlVal) && !urlVal.includes('{{')) {
+            urlVal = `https://${urlVal}`;
+          }
+          const isDynamic = urlVal.includes('{{');
+          return {
+            type: 'URL',
+            text: b.text.slice(0, 20),
+            url: urlVal,
+            ...(isDynamic
+              ? { example: [String(urlVal).replace(/\{\{\d+\}\}/g, 'sample')] }
+              : {}),
+          };
         } else if (b.type === 'PHONE_NUMBER') {
-          return { type: 'PHONE_NUMBER', text: b.text, phone_number: b.value };
-        } else {
-          return { type: 'QUICK_REPLY', text: b.text };
+          const rawPhone = String(b.value || b.phone_number || '').replace(/[^\d+]/g, '');
+          const cleanPhone = rawPhone.startsWith('+') ? rawPhone : `+${rawPhone}`;
+          return {
+            type: 'PHONE_NUMBER',
+            text: b.text.slice(0, 20),
+            phone_number: cleanPhone,
+          };
+        } else if (b.type === 'COUPON') {
+          return {
+            type: 'COPY_CODE',
+            example: String(b.value || 'PROMO'),
+          };
         }
+        return { type: 'QUICK_REPLY', text: b.text.slice(0, 20) };
       });
-      components.push({
-        type: 'BUTTONS',
-        buttons: formattedBtns,
-      });
+      components.push({ type: 'BUTTONS', buttons: formattedBtns });
     }
 
     const payload = {
@@ -376,10 +500,8 @@ export class MessengerService implements OnModuleInit {
       components,
     };
 
-    const url = `${this.baseUrl}/create_template`;
-    this.logger.log(
-      `Submitting template to Meta API: POST ${url} with payload: ${JSON.stringify(payload)}`,
-    );
+    const url = `${this.baseUrl}/${this.wabaId}/message_templates`;
+    this.logger.log(`Submitting template to Meta: POST ${url} payload: ${JSON.stringify(payload)}`);
 
     try {
       const res = await fetch(url, {
@@ -387,41 +509,18 @@ export class MessengerService implements OnModuleInit {
         headers: this.getHeaders('application/json'),
         body: JSON.stringify(payload),
       });
+      const responseData: any = await res.json().catch(() => ({}));
 
-      const responseData = await res.json().catch(() => ({}));
-
-      if (
-        !res.ok ||
-        responseData?.status === false ||
-        responseData?.success === false ||
-        responseData?.error
-      ) {
-        let errorMsg =
-          responseData?.message ||
-          responseData?.error_message ||
-          responseData?.error_user_msg;
-        if (!errorMsg && typeof responseData?.error === 'string') {
-          errorMsg = responseData.error;
-        } else if (
-          !errorMsg &&
-          typeof responseData?.error === 'object' &&
-          responseData?.error?.message
-        ) {
-          errorMsg = responseData.error.message;
-        }
-        if (!errorMsg) {
-          errorMsg = `Meta API error (HTTP ${res.status}): ${JSON.stringify(responseData)}`;
-        }
-
+      if (!res.ok || responseData?.error) {
+        const errorMsg = this.extractError(responseData, res.status);
         this.logger.error(
           `❌ Meta Template Creation FAILED (${res.status}): ${errorMsg} | Response: ${JSON.stringify(responseData)}`,
         );
-        return { success: false, error: String(errorMsg), data: responseData };
+        return { success: false, error: errorMsg, data: responseData };
       }
 
-      this.logger.log(
-        `✅ Meta Template Creation SUCCESS: ${JSON.stringify(responseData)}`,
-      );
+      // Success shape: { id, status: "PENDING", category }
+      this.logger.log(`✅ Meta Template Creation SUCCESS: ${JSON.stringify(responseData)}`);
       return { success: true, data: responseData };
     } catch (err: any) {
       this.logger.error(`Meta Template Creation exception: ${err.message}`);
@@ -430,16 +529,17 @@ export class MessengerService implements OnModuleInit {
   }
 
   // ==========================================
-  // 4. SEND APIS (/api/send)
+  // 4. SEND APIS
+  // POST /{PHONE_NUMBER_ID}/messages
+  // Note: free-form (non-template) messages only deliver inside the
+  // 24-hour customer service window. Outside it, use sendTemplate.
   // ==========================================
 
-  /**
-   * Generic Send Execution
-   */
-  private async executeSend(payload: any): Promise<MessengerSendResult> {
-    const url = `${this.baseUrl}/send`;
+  private async executeSend(rawPayload: any): Promise<MessengerSendResult> {
+    const payload = { messaging_product: 'whatsapp', ...rawPayload };
+    const url = `${this.baseUrl}/${this.phoneNumberId}/messages`;
     this.logger.log(
-      `Calling Messenger API: POST ${url} for recipient ${payload.to} with payload: ${JSON.stringify(payload)}`,
+      `Calling Meta API: POST ${url} for recipient ${payload.to} with payload: ${JSON.stringify(payload)}`,
     );
 
     try {
@@ -456,53 +556,12 @@ export class MessengerService implements OnModuleInit {
         headers: this.getHeaders('application/json'),
         body: JSON.stringify(payload),
       });
+      const responseData: any = await res.json().catch(() => ({}));
 
-      const responseData = await res.json().catch(() => ({}));
-
-      // Detect HTTP errors OR API response-level failure objects
-      const hasHttpError = !res.ok;
-      const hasApiError =
-        responseData?.status === false ||
-        responseData?.status === 'false' ||
-        responseData?.status === 'failed' ||
-        responseData?.status === 'error' ||
-        responseData?.success === false ||
-        responseData?.success === 'false' ||
-        Boolean(responseData?.error) ||
-        Boolean(responseData?.errors);
-
-      if (hasHttpError || hasApiError) {
-        let errorMsg =
-          responseData?.message ||
-          responseData?.error_message ||
-          responseData?.error_user_msg ||
-          responseData?.reason;
-
-        if (!errorMsg && typeof responseData?.error === 'string') {
-          errorMsg = responseData.error;
-        } else if (
-          !errorMsg &&
-          typeof responseData?.error === 'object' &&
-          responseData?.error?.message
-        ) {
-          errorMsg = responseData.error.message;
-        } else if (
-          !errorMsg &&
-          Array.isArray(responseData?.errors) &&
-          responseData.errors[0]
-        ) {
-          const err0 = responseData.errors[0];
-          errorMsg =
-            typeof err0 === 'string'
-              ? err0
-              : err0.message || JSON.stringify(err0);
-        }
-        if (!errorMsg) {
-          errorMsg = `API error (HTTP ${res.status}): ${JSON.stringify(responseData)}`;
-        }
-
+      if (!res.ok || responseData?.error) {
+        const errorMsg = this.extractError(responseData, res.status);
         this.logger.error(
-          `❌ Messenger API Send FAILED (${res.status}): ${errorMsg} | Raw Payload: ${JSON.stringify(payload)} | Raw Response: ${JSON.stringify(responseData)}`,
+          `❌ Meta Send FAILED (${res.status}): ${errorMsg} | Response: ${JSON.stringify(responseData)}`,
         );
         return {
           metaMessageId: `wamid.failed.${Date.now()}`,
@@ -513,22 +572,12 @@ export class MessengerService implements OnModuleInit {
       }
 
       const messageId =
-        responseData?.messages?.[0]?.id ||
-        responseData?.data?.id ||
-        responseData?.id ||
-        `wamid.${randomUUID().replace(/-/g, '')}`;
+        responseData?.messages?.[0]?.id || `wamid.${randomUUID().replace(/-/g, '')}`;
 
-      this.logger.log(
-        `✅ Messenger API Send SUCCESS: ${messageId} | Response: ${JSON.stringify(responseData)}`,
-      );
-
-      return {
-        metaMessageId: messageId,
-        status: 'sent',
-        rawResponse: responseData,
-      };
+      this.logger.log(`✅ Meta Send SUCCESS: ${messageId}`);
+      return { metaMessageId: messageId, status: 'sent', rawResponse: responseData };
     } catch (error: any) {
-      this.logger.error(`Messenger API call exception: ${error.message}`);
+      this.logger.error(`Meta API call exception: ${error.message}`);
       return {
         metaMessageId: `wamid.err.${Date.now()}`,
         status: 'failed',
@@ -537,9 +586,6 @@ export class MessengerService implements OnModuleInit {
     }
   }
 
-  /**
-   * Send Text Message
-   */
   async sendText(
     to: string,
     text: string | { body?: string; text?: string },
@@ -555,127 +601,69 @@ export class MessengerService implements OnModuleInit {
     }
     bodyText = bodyText.trim() || 'Hello';
 
-    const payload = {
-      messaging_product: 'whatsapp',
+    return this.executeSend({
       recipient_type: 'individual',
       to: cleanTo,
       type: 'text',
-      text: {
-        body: bodyText,
-      },
-    };
-
-    return this.executeSend(payload);
+      text: { body: bodyText },
+    });
   }
 
-  /**
-   * Send Image Message
-   */
-  async sendImage(
-    to: string,
-    imageUrl: string,
-    caption?: string,
-  ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
+  async sendImage(to: string, imageUrl: string, caption?: string): Promise<MessengerSendResult> {
     const payload: any = {
-      messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'image',
-      image: {
-        link: imageUrl,
-      },
+      image: { link: imageUrl },
     };
-    if (caption && caption.trim()) {
-      payload.image.caption = caption.trim();
-    }
+    if (caption && caption.trim()) payload.image.caption = caption.trim();
     return this.executeSend(payload);
   }
 
-  /**
-   * Send Video Message
-   */
-  async sendVideo(
-    to: string,
-    videoUrl: string,
-    caption?: string,
-  ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
+  async sendVideo(to: string, videoUrl: string, caption?: string): Promise<MessengerSendResult> {
     const payload: any = {
-      messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'video',
-      video: {
-        link: videoUrl,
-      },
+      video: { link: videoUrl },
     };
-    if (caption && caption.trim()) {
-      payload.video.caption = caption.trim();
-    }
+    if (caption && caption.trim()) payload.video.caption = caption.trim();
     return this.executeSend(payload);
   }
 
-  /**
-   * Send Document Message
-   */
   async sendDocument(
     to: string,
     documentUrl: string,
     filename?: string,
     caption?: string,
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
     const payload: any = {
-      messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'document',
-      document: {
-        link: documentUrl,
-      },
+      document: { link: documentUrl },
     };
-    if (filename && filename.trim())
-      payload.document.filename = filename.trim();
+    if (filename && filename.trim()) payload.document.filename = filename.trim();
     if (caption && caption.trim()) payload.document.caption = caption.trim();
-
     return this.executeSend(payload);
   }
 
-  /**
-   * Send Audio Message
-   */
   async sendAudio(to: string, audioUrl: string): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
-    const payload = {
-      messaging_product: 'whatsapp',
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'audio',
-      audio: {
-        link: audioUrl,
-      },
-    };
-    return this.executeSend(payload);
+      audio: { link: audioUrl },
+    });
   }
 
-  /**
-   * Send Location Message
-   */
   async sendLocation(
     to: string,
-    location: {
-      longitude: number;
-      latitude: number;
-      name?: string;
-      address?: string;
-    },
+    location: { longitude: number; latitude: number; name?: string; address?: string },
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
-    const payload = {
-      messaging_product: 'whatsapp',
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'location',
       location: {
         longitude: location.longitude,
@@ -683,33 +671,22 @@ export class MessengerService implements OnModuleInit {
         name: location.name || 'Location',
         address: location.address || '',
       },
-    };
-    return this.executeSend(payload);
+    });
   }
 
-  /**
-   * Send Template Message
-   */
   async sendTemplate(
     to: string,
     templateName: string,
     languageCode: string = 'en',
     components: any[] = [],
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
-    const cleanName = (templateName || '').trim();
-    const lang = (languageCode || 'en').trim();
-
     const payload: any = {
-      messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'template',
       template: {
-        name: cleanName,
-        language: {
-          code: lang,
-        },
+        name: (templateName || '').trim(),
+        language: { code: (languageCode || 'en').trim() },
       },
     };
     if (components && components.length > 0) {
@@ -718,52 +695,37 @@ export class MessengerService implements OnModuleInit {
     return this.executeSend(payload);
   }
 
-  /**
-   * Send Interactive Message with Reply Buttons
-   */
   async sendInteractiveButtons(
     to: string,
     text: string,
     buttons: Array<{ id: string; title: string }>,
     opts?: { headerText?: string; headerMedia?: BotHeaderMedia; footerText?: string },
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
     const interactive: any = {
       type: 'button',
-      body: {
-        text,
-      },
+      body: { text: (text || ' ').slice(0, 1024) },
       action: {
         buttons: buttons.map((b) => ({
           type: 'reply',
-          reply: {
-            id: b.id,
-            title: b.title,
-          },
+          reply: { id: b.id, title: b.title.slice(0, 20) }, // Meta limit: 20 chars
         })),
       },
     };
     if (opts?.headerMedia) {
       interactive.header = this.buildMediaHeader(opts.headerMedia);
     } else if (opts?.headerText) {
-      interactive.header = { type: 'text', text: opts.headerText };
+      interactive.header = { type: 'text', text: opts.headerText.slice(0, 60) };
     }
-    if (opts?.footerText) {
-      interactive.footer = { text: opts.footerText };
-    }
+    if (opts?.footerText) interactive.footer = { text: opts.footerText.slice(0, 60) };
 
-    const payload = {
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
-      type: 'interactiveWithButton',
+      to: this.sanitizePhoneNumber(to),
+      type: 'interactive',
       interactive,
-    };
-    return this.executeSend(payload);
+    });
   }
 
-  /**
-   * Send Interactive Message with CTA URL Button
-   */
   async sendInteractiveCtaUrl(
     to: string,
     bodyText: string,
@@ -773,16 +735,12 @@ export class MessengerService implements OnModuleInit {
     footerText?: string,
     headerMedia?: BotHeaderMedia,
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
     const interactive: any = {
       type: 'cta_url',
-      body: { text: bodyText },
+      body: { text: (bodyText || ' ').slice(0, 1024) },
       action: {
         name: 'cta_url',
-        parameters: {
-          display_text: displayText,
-          url,
-        },
+        parameters: { display_text: displayText.slice(0, 20), url },
       },
     };
     if (headerMedia) {
@@ -792,18 +750,14 @@ export class MessengerService implements OnModuleInit {
     }
     if (footerText) interactive.footer = { text: footerText };
 
-    const payload = {
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
-      type: 'interactiveWithButton',
+      to: this.sanitizePhoneNumber(to),
+      type: 'interactive',
       interactive,
-    };
-    return this.executeSend(payload);
+    });
   }
 
-  /**
-   * Send Interactive Message with List
-   */
   async sendInteractiveList(
     to: string,
     bodyText: string,
@@ -815,31 +769,22 @@ export class MessengerService implements OnModuleInit {
     headerText?: string,
     footerText?: string,
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
     const interactive: any = {
       type: 'list',
       body: { text: bodyText },
-      action: {
-        button: buttonText,
-        sections,
-      },
+      action: { button: buttonText, sections },
     };
     if (headerText) interactive.header = { type: 'text', text: headerText };
     if (footerText) interactive.footer = { text: footerText };
 
-    const payload = {
-      messaging_product: 'whatsapp',
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
+      to: this.sanitizePhoneNumber(to),
       type: 'interactive',
       interactive,
-    };
-    return this.executeSend(payload);
+    });
   }
 
-  /**
-   * Send Address Request Message (India & Singapore)
-   */
   async sendInteractiveAddress(
     to: string,
     bodyText: string,
@@ -847,11 +792,10 @@ export class MessengerService implements OnModuleInit {
     customerName: string,
     phoneNumber: string,
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
-    const payload = {
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
-      type: 'interactiveGetAddress',
+      to: this.sanitizePhoneNumber(to),
+      type: 'interactive',
       interactive: {
         type: 'address_message',
         body: { text: bodyText },
@@ -866,13 +810,9 @@ export class MessengerService implements OnModuleInit {
           },
         },
       },
-    };
-    return this.executeSend(payload);
+    });
   }
 
-  /**
-   * Send Interactive Flow Message
-   */
   async sendInteractiveFlow(
     to: string,
     flowData: {
@@ -886,7 +826,6 @@ export class MessengerService implements OnModuleInit {
       footer?: string;
     },
   ): Promise<MessengerSendResult> {
-    const cleanTo = this.sanitizePhoneNumber(to);
     const interactive: any = {
       type: 'flow',
       body: { text: flowData.body },
@@ -898,23 +837,19 @@ export class MessengerService implements OnModuleInit {
           flow_id: flowData.flowId,
           flow_cta: flowData.flowCta,
           flow_action: flowData.flowAction || 'navigate',
-          flow_action_payload: {
-            screen: flowData.screen || 'welcome',
-          },
+          flow_action_payload: { screen: flowData.screen || 'welcome' },
         },
       },
     };
     if (flowData.header) interactive.header = { type: 'text', text: flowData.header };
     if (flowData.footer) interactive.footer = { text: flowData.footer };
 
-    const payload = {
-      messaging_product: 'whatsapp',
+    return this.executeSend({
       recipient_type: 'individual',
-      to: cleanTo,
-      type: 'interactiveFlow',
+      to: this.sanitizePhoneNumber(to),
+      type: 'interactive',
       interactive,
-    };
-    return this.executeSend(payload);
+    });
   }
 
   // ==========================================
@@ -922,21 +857,10 @@ export class MessengerService implements OnModuleInit {
   // ==========================================
 
   /**
-   * Send a message with bot-configured buttons (Quick Reply / Website /
-   * Call), routing to the correct underlying WhatsApp message type.
-   *
-   * WhatsApp session-message rules this enforces:
-   *  - QUICK_REPLY only, up to 3        -> sendInteractiveButtons
-   *  - Exactly one URL button, no others -> sendInteractiveCtaUrl
-   *  - Any PHONE_NUMBER button, or mixed
-   *    button types, or >1 URL button    -> cannot be sent as a session
-   *    message at all; caller must use an approved template instead
-   *    (see createTemplate + sendTemplate). This method will not attempt
-   *    that automatically since it requires a pre-approved template name.
-   *
-   * If `opts.headerMedia` is provided (image/video/document), it's
-   * attached directly to the interactive message header so the media,
-   * body text, and buttons all arrive as ONE WhatsApp message/bubble.
+   * Routes bot-configured buttons to the correct WhatsApp message type:
+   *  - QUICK_REPLY only, up to 3          -> sendInteractiveButtons
+   *  - Exactly one URL button, no others  -> sendInteractiveCtaUrl
+   *  - Phone button / mixed / >1 URL      -> needs an approved template
    */
   async sendButtonsMessage(
     to: string,
@@ -958,60 +882,81 @@ export class MessengerService implements OnModuleInit {
       return this.sendText(to, bodyText);
     }
 
-    const hasPhone = cleaned.some((b) => b.type === 'PHONE_NUMBER');
-    const urlButtons = cleaned.filter((b) => b.type === 'URL');
-    const quickReplyButtons = cleaned.filter((b) => b.type === 'QUICK_REPLY');
-    const typeCount = [hasPhone, urlButtons.length > 0, quickReplyButtons.length > 0].filter(Boolean).length;
-
-    // Phone-call buttons, mixed button types, or multiple URL buttons
-    // are not supported on a plain session message — an approved
-    // template is required.
-    if (hasPhone || typeCount > 1 || urlButtons.length > 1) {
-      this.logger.warn(
-        `sendButtonsMessage: button combination requires an approved WhatsApp template (phone button, mixed types, or multiple URLs). Skipping direct send for ${to}.`,
-      );
-      return {
-        metaMessageId: `wamid.skipped.${Date.now()}`,
-        status: 'failed',
-        error:
-          'This button combination requires an approved WhatsApp message template (e.g. a call button, or mixing button types). Use createTemplate/sendTemplate instead.',
-        requiresTemplate: true,
-      };
-    }
-
-    if (urlButtons.length === 1) {
-      const btn = urlButtons[0];
+    // Case 1: Exactly one URL button and no other buttons -> send native CTA URL button
+    if (cleaned.length === 1 && cleaned[0].type === 'URL') {
+      const btn = cleaned[0];
+      let urlVal = btn.value;
+      if (urlVal && !/^https?:\/\//i.test(urlVal)) {
+        urlVal = `https://${urlVal}`;
+      }
       return this.sendInteractiveCtaUrl(
         to,
         bodyText,
-        btn.text,
-        btn.value,
+        btn.text.slice(0, 20),
+        urlVal,
         opts?.headerText,
         opts?.footerText,
         opts?.headerMedia,
       );
     }
 
-    // Quick-reply only
-    return this.sendInteractiveButtons(
-      to,
-      bodyText,
-      quickReplyButtons.map((b) => ({ id: b.id, title: b.text })),
-      { headerText: opts?.headerText, headerMedia: opts?.headerMedia, footerText: opts?.footerText },
-    );
+    // Case 2: Interactive reply buttons (supports up to 3 buttons: Quick Reply, Call, URL, Location)
+    const replyButtons = cleaned.map((b) => {
+      let title = b.text.trim();
+      const isCall = b.type === 'PHONE_NUMBER' || /call|phone/i.test(title);
+      const isLoc = b.type === 'LOCATION' || /location|map|address|store/i.test(title);
+      if (isCall && !title.includes('📞')) {
+        title = `📞 ${title}`;
+      } else if (isLoc && !title.includes('📍')) {
+        title = `📍 ${title}`;
+      } else if (b.type === 'URL' && !title.includes('🌐') && !title.includes('🔗')) {
+        title = `🌐 ${title}`;
+      }
+      return {
+        id: b.id,
+        title: title.slice(0, 20),
+      };
+    });
+
+    try {
+      const interactiveRes = await this.sendInteractiveButtons(
+        to,
+        bodyText,
+        replyButtons,
+        {
+          headerText: opts?.headerText,
+          headerMedia: opts?.headerMedia,
+          footerText: opts?.footerText,
+        },
+      );
+      if (interactiveRes.status !== 'failed') {
+        return interactiveRes;
+      }
+    } catch (err: any) {
+      this.logger.warn(`sendInteractiveButtons fallback for ${to}: ${err.message}`);
+    }
+
+    // Fallback: send text message with bodyText
+    return this.sendText(to, bodyText);
   }
 
   // ==========================================
-  // 5. MEDIA APIS (/api/upload & /api/media)
+  // 5. MEDIA APIS
   // ==========================================
 
   /**
    * Upload Media
-   * POST /upload
+   * POST /{PHONE_NUMBER_ID}/media
+   * Pass FormData containing a `file` field (a Blob/File with a proper
+   * mime type). `messaging_product` is added automatically.
+   * Returns { id } which can be used as `{ id }` instead of `{ link }`.
    */
   async uploadMedia(formData: FormData): Promise<any> {
-    const url = `${this.baseUrl}/upload`;
+    const url = `${this.baseUrl}/${this.phoneNumberId}/media`;
     try {
+      if (!formData.has('messaging_product')) {
+        formData.append('messaging_product', 'whatsapp');
+      }
       const res = await fetch(url, {
         method: 'POST',
         headers: this.getHeaders(null),
@@ -1025,16 +970,13 @@ export class MessengerService implements OnModuleInit {
   }
 
   /**
-   * Get Media
-   * GET /media?mediaId=...&download=true
+   * Get Media metadata (includes a temporary `url`, valid ~5 minutes).
+   * GET /{MEDIA_ID}
    */
   async getMedia(mediaId: string): Promise<any> {
-    const url = `${this.baseUrl}/media?mediaId=${encodeURIComponent(mediaId)}&download=true`;
+    const url = `${this.baseUrl}/${encodeURIComponent(mediaId)}`;
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
+      const res = await fetch(url, { method: 'GET', headers: this.getHeaders() });
       return await res.json();
     } catch (err: any) {
       this.logger.error(`getMedia error: ${err.message}`);
@@ -1042,18 +984,32 @@ export class MessengerService implements OnModuleInit {
     }
   }
 
+  /**
+   * Download the actual media bytes (the media URL requires the bearer token).
+   */
+  async downloadMedia(mediaId: string): Promise<{ buffer: Buffer; mimeType: string }> {
+    const meta = await this.getMedia(mediaId);
+    if (!meta?.url) {
+      throw new Error(`Media URL not found: ${JSON.stringify(meta)}`);
+    }
+    const res = await fetch(meta.url, { headers: { Authorization: `Bearer ${this.apiKey}` } });
+    if (!res.ok) throw new Error(`Media download failed (${res.status})`);
+    return {
+      buffer: Buffer.from(await res.arrayBuffer()),
+      mimeType: meta.mime_type || res.headers.get('content-type') || 'application/octet-stream',
+    };
+  }
+
   // ==========================================
-  // 6. WEBHOOK APIS (/api/webhook)
+  // 6. WEBHOOK
+  // The main callback URL + verify token are set in the Meta dashboard
+  // (WhatsApp > Configuration). These methods manage the app's
+  // subscription to your WABA and an optional per-WABA callback override.
   // ==========================================
 
-  /**
-   * Get Webhook Info
-   * GET /webhook
-   */
   async getWebhookInfo(): Promise<any> {
-    const url = `${this.baseUrl}/webhook`;
     try {
-      const res = await fetch(url, {
+      const res = await fetch(`${this.baseUrl}/${this.wabaId}/subscribed_apps`, {
         method: 'GET',
         headers: this.getHeaders(),
       });
@@ -1065,24 +1021,29 @@ export class MessengerService implements OnModuleInit {
   }
 
   /**
-   * Register / Update Webhook
-   * POST /webhook
+   * Subscribe the app to the WABA, optionally overriding the callback URL.
    */
-  async registerWebhook(webhookUrl: string): Promise<any> {
-    const url = `${this.baseUrl}/webhook`;
-    const formData = new URLSearchParams();
-    formData.append('url', webhookUrl);
-
+  async registerWebhook(webhookUrl?: string): Promise<any> {
+    const body: any = {};
+    if (webhookUrl) {
+      body.override_callback_uri = webhookUrl;
+      body.verify_token =
+        this.config.get<string>('META_WEBHOOK_VERIFY_TOKEN') ||
+        this.config.get<string>('MESSENGER_WEBHOOK_VERIFY_TOKEN') ||
+        '';
+    }
     try {
-      const res = await fetch(url, {
+      const res = await fetch(`${this.baseUrl}/${this.wabaId}/subscribed_apps`, {
         method: 'POST',
-        headers: {
-          ...this.getHeaders('application/x-www-form-urlencoded'),
-        },
-        body: formData.toString(),
+        headers: this.getHeaders('application/json'),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
-      this.logger.log(`Webhook registered with Messenger API: ${webhookUrl}`);
+      if (res.ok) {
+        this.logger.log(`Subscribed app to WABA ${this.wabaId}${webhookUrl ? ` (callback: ${webhookUrl})` : ''}`);
+      } else {
+        this.logger.error(`Webhook subscribe failed: ${this.extractError(data, res.status)}`);
+      }
       return { success: res.ok, data };
     } catch (err: any) {
       this.logger.error(`Webhook registration error: ${err.message}`);
@@ -1090,14 +1051,9 @@ export class MessengerService implements OnModuleInit {
     }
   }
 
-  /**
-   * Delete Webhook
-   * DELETE /webhook
-   */
   async deleteWebhook(): Promise<any> {
-    const url = `${this.baseUrl}/webhook`;
     try {
-      const res = await fetch(url, {
+      const res = await fetch(`${this.baseUrl}/${this.wabaId}/subscribed_apps`, {
         method: 'DELETE',
         headers: this.getHeaders(),
       });

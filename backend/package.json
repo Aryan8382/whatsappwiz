@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "nest build",
-    "start": "nest start",
+    "build": "prisma generate && nest build",
+    "start": "node dist/main",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
+    "postinstall": "prisma generate",
     "db:setup": "prisma migrate deploy && prisma db seed",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

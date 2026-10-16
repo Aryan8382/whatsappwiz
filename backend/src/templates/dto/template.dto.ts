@@ -16,12 +16,19 @@ export class CreateTemplateDto {
   @IsString()
   header?: string;
 
+  @IsOptional()
+  @IsString()
+  headerMediaUrl?: string;
+
   @IsString()
   body: string;
 
   @IsOptional()
   @IsString()
   footer?: string;
+
+  @IsOptional()
+  buttons?: any;
 }
 
 export class UpdateTemplateDto {
@@ -48,4 +55,7 @@ export class UpdateTemplateDto {
   @IsOptional()
   @IsString()
   footer?: string;
+
+  @IsOptional()
+  buttons?: any;
 }

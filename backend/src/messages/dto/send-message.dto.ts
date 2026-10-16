@@ -29,6 +29,10 @@ export class SendTemplateDto {
   @IsArray()
   @IsString({ each: true })
   parameters?: string[];
+
+  @IsOptional()
+  @IsString()
+  headerMediaUrl?: string;
 }
 
 export class SendMediaDto {

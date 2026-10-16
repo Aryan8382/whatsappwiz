@@ -216,6 +216,26 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
 
+      let textToSave = text;
+      let parsedButtons: any[] = [];
+      if (campaign.template?.buttons) {
+        try {
+          parsedButtons = typeof campaign.template.buttons === 'string'
+            ? JSON.parse(campaign.template.buttons)
+            : campaign.template.buttons;
+        } catch {}
+      }
+
+      if (campaign.template?.header || campaign.template?.footer || (parsedButtons && parsedButtons.length > 0)) {
+        textToSave = JSON.stringify({
+          header: campaign.template?.header || null,
+          body: text,
+          footer: campaign.template?.footer || null,
+          buttons: parsedButtons,
+          headerType: campaign.template?.header ? campaign.template.header.replace(/[\[\]]/g, '').toLowerCase() : undefined,
+        });
+      }
+
       const message = await this.prisma.message.create({
         data: {
           organizationId: campaign.organizationId,
@@ -225,7 +245,7 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
           ),
           senderType: 'system',
           messageType: 'template',
-          messageText: text,
+          messageText: textToSave,
           metaMessageId: result.metaMessageId,
           status: 'sent',
           sentAt: new Date(),
@@ -240,6 +260,17 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
         where: { id: campaign.id },
         data: { sentCount: { increment: 1 } },
       });
+      if (log.contact?.id) {
+        await this.prisma.contact.update({
+          where: { id: log.contact.id },
+          data: { lastInteraction: new Date() },
+        }).catch(() => {});
+      }
+      await this.prisma.conversation.update({
+        where: { id: message.conversationId },
+        data: { status: 'open', updatedAt: new Date() },
+      }).catch(() => {});
+
       this.realtime.emitToOrg(Number(campaign.organizationId), 'message:new', message);
       this.webhooks.dispatch(Number(campaign.organizationId), 'message.sent', message);
 

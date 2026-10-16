@@ -305,6 +305,7 @@ model Template {
   header          String?   @db.Text
   body            String    @db.LongText
   footer          String?   @db.Text
+  buttons         String?   @db.Text
   rejectionReason String?   @map("rejection_reason") @db.Text
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")

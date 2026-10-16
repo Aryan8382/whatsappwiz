@@ -13,6 +13,7 @@ import {
   getBotButtonWarnings,
   parseBotConfig,
   isPureGreeting,
+  isInventoryQuery,
 } from './catalog-search';
 
 function wordMatch(text: string, word: string): boolean {
@@ -51,24 +52,70 @@ function extractKeywords(text: string): string[] {
   return Array.from(new Set(filtered));
 }
 
-const SUPPORTED_IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
+export function formatButtonsIntoText(text: string, buttons?: BotButton[]): string {
+  if (!buttons || buttons.length === 0) return text;
+  const buttonLines = buttons
+    .map((b) => {
+      const label = (b.text || '').trim();
+      let val = (b.value || '').trim();
+      if (!label) return null;
+
+      const isLoc = /location|map|address|store|directions/i.test(label) || b.type === 'LOCATION';
+      const isContact = /contact|call|phone|support|help/i.test(label) || b.type === 'PHONE_NUMBER';
+
+      if (b.type === 'PHONE_NUMBER' || (isContact && /^\+?\d[\d\s-]{6,}$/.test(val))) {
+        return val ? `📞 *${label}*: ${val}` : `📞 *${label}*`;
+      } else if (b.type === 'LOCATION' || isLoc) {
+        if (val && !/^https?:\/\//i.test(val)) val = `https://${val}`;
+        return val ? `📍 *${label}*: ${val}` : `📍 *${label}*`;
+      } else if (b.type === 'URL' || /^(https?:\/\/|www\.)/i.test(val) || val.includes('.')) {
+        if (val && !/^https?:\/\//i.test(val)) {
+          val = `https://${val}`;
+        }
+        return val ? `🌐 *${label}*: ${val}` : `🌐 *${label}*`;
+      } else {
+        return `👉 *${label}*`;
+      }
+    })
+    .filter(Boolean);
+
+  if (buttonLines.length === 0) return text;
+  const clean = (text || '').trim();
+  return clean ? `${clean}\n\n${buttonLines.join('\n')}` : buttonLines.join('\n');
+}
+
+const SUPPORTED_IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif'];
 function isValidImageUrl(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (trimmed.startsWith('/uploads/') || trimmed.includes('/uploads/')) return true;
   try {
-    const u = new URL(url);
+    const u = new URL(trimmed);
     const pathname = u.pathname.toLowerCase();
     return (
       SUPPORTED_IMAGE_EXT.some(ext => pathname.endsWith(ext)) ||
       u.hostname.includes('pexels.com') ||
       u.hostname.includes('unsplash.com') ||
+      u.hostname.includes('images.unsplash.com') ||
       u.hostname.includes('pixabay.com') ||
       u.hostname.includes('cdn') ||
       u.hostname.includes('cloudinary') ||
+      u.hostname.includes('gstatic.com') ||
+      u.hostname.includes('googleusercontent.com') ||
+      u.hostname.includes('wp-content') ||
+      u.hostname.includes('s3.') ||
+      u.hostname.includes('amazonaws') ||
+      pathname.includes('image') ||
+      pathname.includes('img') ||
+      pathname.includes('photo') ||
       u.searchParams.has('w') ||
-      u.searchParams.has('width')
+      u.searchParams.has('width') ||
+      u.searchParams.has('tbn') ||
+      /\.(jpg|jpeg|png|gif|webp|bmp|svg|avif)(\?|$)/i.test(pathname) ||
+      SUPPORTED_IMAGE_EXT.some(ext => u.search.toLowerCase().includes(ext))
     );
   } catch {
-    return /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/i.test(url);
+    return /\.(jpg|jpeg|png|gif|webp|bmp|svg|avif)(\?|$)/i.test(trimmed);
   }
 }
 
@@ -186,6 +233,7 @@ export class BotEngineService {
         id: BigInt(conversationId),
         organizationId: BigInt(organizationId),
       },
+      include: { contact: true },
     });
     if (!conversation) {
       this.sessions.delete(conversationId);
@@ -209,12 +257,39 @@ export class BotEngineService {
     }
 
     if (reply.trim() && botConfig && (botConfig.greeting || Array.isArray(botConfig.products))) {
-      const saved: any[] = [];
+      const recipientPhone = conversation.contact.mobile;
+      const companyName = botConfig.companyName || flow.name || 'our store';
+      const cleanReply = reply.trim();
+      const lowerReply = cleanReply.toLowerCase().replace(/^[📞📍🌐🔗👉🛍️\s]+/, '').trim();
 
+      // Helper to persist and emit media sent over WhatsApp
+      const persistSentMedia = async (
+        mediaType: 'image' | 'video' | 'document',
+        mediaUrl: string,
+        captionText: string | undefined,
+        sendRes: { metaMessageId: string; status: string },
+      ) => {
+        const saved = await this.prisma.message.create({
+          data: {
+            organizationId: BigInt(organizationId),
+            conversationId: conversation.id,
+            whatsappNumberId: conversation.whatsappNumberId || null,
+            senderType: 'bot',
+            messageType: mediaType,
+            messageText: captionText || null,
+            mediaUrl,
+            metaMessageId: sendRes.metaMessageId,
+            status: sendRes.status === 'failed' ? 'failed' : 'sent',
+            sentAt: new Date(),
+          },
+        });
+        await this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }).catch(() => {});
+        this.realtime.emitToOrg(organizationId, 'message:new', saved);
+        return saved;
+      };
+
+      // ── CASE 1: Pure greeting ("hi", "hello", "hey", etc.) ──
       if (isPureGreeting(reply)) {
-        // Combine the header media (image/video/document) and the first
-        // text message into a SINGLE WhatsApp message by sending the media
-        // with the text as its caption, instead of two separate bubbles.
         const botMessages = buildBotUiMessages(reply, botConfig, flow.name);
 
         let caption: string | undefined;
@@ -239,11 +314,8 @@ export class BotEngineService {
         );
 
         if (headerSaved.length > 0) {
-          // Header media (and buttons, if any) sent successfully.
-          saved.push(...headerSaved);
+          return headerSaved;
         } else if (caption) {
-          // No header media configured (or it failed) — fall back to
-          // sending the text on its own so we don't lose the greeting.
           const sentText = await this.send(
             organizationId,
             conversationId,
@@ -251,112 +323,212 @@ export class BotEngineService {
             new Date(),
             captionButtons,
           );
-          if (sentText) saved.push(sentText);
+          if (sentText) return [sentText];
         }
 
         if (remaining.length > 0) {
-          saved.push(
-            ...(await this.sendBotUiMessages(organizationId, conversationId, remaining)),
+          return await this.sendBotUiMessages(organizationId, conversationId, remaining);
+        }
+      }
+
+      // ── CASE 2: Configured Button Clicks & Intent Triggers ──
+      const configuredBtns: BotButton[] = Array.isArray(botConfig.buttons) ? botConfig.buttons : [];
+      const matchedBtn = configuredBtns.find((b) => {
+        const bText = String(b.text || '').toLowerCase().trim();
+        const bVal = String(b.value || '').toLowerCase().trim();
+        if (!bText && !bVal) return false;
+        return (
+          lowerReply === bText ||
+          lowerReply === bVal ||
+          (b.id && cleanReply === b.id) ||
+          (bText.length > 2 && (lowerReply.includes(bText) || bText.includes(lowerReply)))
+        );
+      });
+
+      const isCallIntent = matchedBtn?.type === 'PHONE_NUMBER' || /call|phone|contact|support/i.test(lowerReply);
+      const isLocIntent = matchedBtn?.type === 'LOCATION' || /location|map|address|store|directions|where/i.test(lowerReply);
+      const isWebsiteIntent = matchedBtn?.type === 'URL' || /website|link|site|url|online/i.test(lowerReply);
+
+      if (isCallIntent || matchedBtn?.type === 'PHONE_NUMBER') {
+        const phoneBtn = configuredBtns.find((b) => b.type === 'PHONE_NUMBER') || matchedBtn;
+        const phone = phoneBtn?.value || '+91 76239 83591';
+        const msg = `📞 *Call Us Directly*\n\nYou can connect with our customer support at:\n*${phone}*\n\nTap the phone number above to call right now! We are available to assist you with purchases, custom designs, and inquiries.`;
+        const res = await this.send(organizationId, conversationId, msg, new Date(), [
+          { id: 'all_prod', type: 'QUICK_REPLY', text: '🛍️ All Products' },
+          { id: 'loc', type: 'QUICK_REPLY', text: '📍 Location' },
+        ]);
+        if (res) return [res];
+      }
+
+      if (isLocIntent || matchedBtn?.type === 'LOCATION') {
+        const locBtn = configuredBtns.find((b) => b.type === 'LOCATION' || /location|map/i.test(b.text)) || matchedBtn;
+        let locUrl = locBtn?.value || 'https://maps.google.com';
+        if (!/^https?:\/\//i.test(locUrl)) locUrl = `https://${locUrl}`;
+        const msg = `📍 *Store Location*\n\nVisit our flagship showroom:\n${locUrl}\n\nTap the map link above for directions. We look forward to seeing you!`;
+        const res = await this.send(organizationId, conversationId, msg, new Date(), [
+          { id: 'all_prod', type: 'QUICK_REPLY', text: '🛍️ All Products' },
+          { id: 'call', type: 'QUICK_REPLY', text: '📞 Call Us' },
+        ]);
+        if (res) return [res];
+      }
+
+      if (isWebsiteIntent || matchedBtn?.type === 'URL') {
+        const urlBtn = configuredBtns.find((b) => b.type === 'URL') || matchedBtn;
+        let siteUrl = urlBtn?.value || 'https://google.com';
+        if (!/^https?:\/\//i.test(siteUrl)) siteUrl = `https://${siteUrl}`;
+        const msg = `🌐 *${urlBtn?.text || 'Official Website'}*\n\nExplore our entire collection and latest designs:\n${siteUrl}\n\nLet us know if you need assistance!`;
+        const res = await this.send(organizationId, conversationId, msg, new Date(), [
+          { id: 'all_prod', type: 'QUICK_REPLY', text: '🛍️ All Products' },
+          { id: 'call', type: 'QUICK_REPLY', text: '📞 Call Us' },
+        ]);
+        if (res) return [res];
+      }
+
+      // ── CASE 3: Product Selection (by number, option, name, or keyword) ──
+      const productsList: any[] = Array.isArray(botConfig.products) ? botConfig.products : [];
+      let matchedProduct: any = null;
+
+      // 3a. Numeric selection: "1", "#1", "option 1", "product 1", "item 1", etc.
+      const numMatch = cleanReply.match(/^(?:option\s*|product\s*|item\s*|#\s*)?(\d{1,2})$/i);
+      if (numMatch && productsList.length > 0) {
+        const idx = parseInt(numMatch[1], 10) - 1;
+        if (idx >= 0 && idx < productsList.length) {
+          matchedProduct = productsList[idx];
+        }
+      }
+
+      // 3b. Name or Keyword match
+      if (!matchedProduct && productsList.length > 0) {
+        // Direct product name match
+        matchedProduct = productsList.find((p) => {
+          const pName = String(p.name || p.title || '').toLowerCase().trim();
+          return pName && (lowerReply.includes(pName) || pName.includes(lowerReply));
+        });
+
+        // Content library search match
+        if (!matchedProduct) {
+          const searchResult = searchContentLibrary(cleanReply, productsList);
+          if (searchResult.matchedProducts.length > 0) {
+            matchedProduct = searchResult.matchedProducts[0];
+          }
+        }
+      }
+
+      // 3c. If product is found, SEND ATTACHED IMAGE AS WHATSAPP MEDIA MESSAGE!
+      if (matchedProduct) {
+        const p = matchedProduct;
+        const validImages = (Array.isArray(p.images) ? p.images : [])
+          .concat(p.image ? [p.image] : [])
+          .filter(isValidImageUrl);
+
+        const priceStr = p.price ? `\n💰 *Price*: ${p.currency || '₹'}${p.price}` : '';
+        const descStr = p.description ? `\n\n${p.description}` : '';
+        const prodCaption = `✨ *${p.name || p.title || 'Product'}*${priceStr}${descStr}\n\nInterested in this piece? Tap *Call Us* or reply here to reserve or order!`;
+
+        const actionBtns: BotButton[] = configuredBtns.length > 0
+          ? configuredBtns
+          : [
+              { id: 'call', type: 'QUICK_REPLY', text: '📞 Call Us' },
+              { id: 'all_prod', type: 'QUICK_REPLY', text: '🛍️ All Products' },
+            ];
+
+        const savedMsgs: any[] = [];
+
+        if (validImages.length > 0) {
+          // Send the primary image with caption & action buttons attached!
+          const result = await this.messenger.sendButtonsMessage(
+            recipientPhone,
+            prodCaption.slice(0, 1024),
+            actionBtns,
+            { headerMedia: { type: 'image', url: validImages[0] } },
           );
+          const savedMain = await persistSentMedia('image', validImages[0], prodCaption, result);
+          savedMsgs.push(savedMain);
+
+          // If product has more images, send up to 2 additional images
+          for (const extraImg of validImages.slice(1, 3)) {
+            const extraRes = await this.messenger.sendImage(recipientPhone, extraImg, undefined);
+            const savedExtra = await persistSentMedia('image', extraImg, undefined, extraRes);
+            savedMsgs.push(savedExtra);
+          }
+        } else {
+          // No attached image, send text card with buttons
+          const savedText = await this.send(
+            organizationId,
+            conversationId,
+            prodCaption,
+            new Date(),
+            actionBtns,
+          );
+          if (savedText) savedMsgs.push(savedText);
         }
-      } else {
-        const botMessages = buildBotUiMessages(reply, botConfig, flow.name);
-        if (botMessages.length > 0) {
-          saved.push(...(await this.sendBotUiMessages(organizationId, conversationId, botMessages)));
+
+        // Send attached videos if any
+        if (Array.isArray(p.videos) && p.videos.length > 0) {
+          for (const vid of p.videos.slice(0, 1)) {
+            const vidRes = await this.messenger.sendVideo(recipientPhone, vid, `🎥 ${p.name}`);
+            savedMsgs.push(await persistSentMedia('video', vid, `🎥 ${p.name}`, vidRes));
+          }
         }
+
+        // Send attached documents if any
+        if (Array.isArray(p.documents) && p.documents.length > 0) {
+          for (const doc of p.documents.slice(0, 1)) {
+            const docRes = await this.messenger.sendDocument(recipientPhone, doc, `${p.name}.pdf`, `📄 ${p.name} Brochure`);
+            savedMsgs.push(await persistSentMedia('document', doc, `📄 ${p.name} Brochure`, docRes));
+          }
+        }
+
+        return savedMsgs;
       }
 
-      if (saved.length > 0) return saved;
-    }
+      // ── CASE 4: Catalog / Menu / Browse inquiry ──
+      const isCatalogInquiry =
+        isInventoryQuery(cleanReply) ||
+        /^(catalog|catalogue|menu|products|items|collection|all|list|options)$/i.test(lowerReply);
 
-    const textLower = reply.trim().toLowerCase();
-    if (textLower && botConfig && Array.isArray(botConfig.products) && botConfig.products.length > 0) {
-      const companyName = botConfig.companyName || 'our store';
-      const keywords = extractKeywords(reply);
-      const isOnlyGreeting = matchesAny(textLower, GREETING_WORDS) && keywords.length === 0;
+      if (isCatalogInquiry) {
+        const greetingCaption = botConfig.greeting || `Here is ${companyName}'s current collection:`;
+        const headerSaved = await this.sendHeaderMedia(
+          organizationId,
+          conversationId,
+          botConfig,
+          greetingCaption,
+          configuredBtns,
+        );
+        if (headerSaved.length > 0) return headerSaved;
 
-      if (isOnlyGreeting) {
-        const defaultGreeting = `👋 Hello there! Welcome to ${companyName}!\n\nThank you for reaching out to us. We're delighted to help you find the perfect piece from our collection.\n\nHow can we assist you today? Feel free to ask about any product or describe what you're looking for!`;
-        await this.send(organizationId, conversationId, botConfig.greeting || defaultGreeting);
-        return;
+        const sentGreeting = await this.send(
+          organizationId,
+          conversationId,
+          greetingCaption,
+          new Date(),
+          configuredBtns,
+        );
+        if (sentGreeting) return [sentGreeting];
       }
 
-      const searchResult = searchContentLibrary(reply, botConfig.products);
-
-      if (searchResult.matchedProducts.length === 1) {
-        const single = searchResult.matchedProducts[0];
-        const priceStr = single.price ? `\nPrice: ${single.currency || '₹'}${single.price}` : '';
-        const descStr = single.description ? `\n${single.description}` : '';
-        let respText = `✨ *${single.name}*${priceStr}${descStr}`;
-
-        if (Array.isArray(single.images) && single.images.length > 0) {
-          respText += `\n🖼️  Images: ${single.images.length}`;
-          const validImgs = single.images.filter(isValidImageUrl);
-          if (validImgs.length > 0) respText += `\nFirst: ${validImgs[0]}`;
-        }
-        if (Array.isArray(single.videos) && single.videos.length > 0) {
-          respText += `\n🎥  Videos: ${single.videos.length}\n${single.videos[0]}`;
-        }
-        if (Array.isArray(single.documents) && single.documents.length > 0) {
-          respText += `\n📄  Documents: ${single.documents.length}\n${single.documents[0]}`;
-        }
-        await this.send(organizationId, conversationId, respText);
-        return;
-      }
-
-      const hasImages = searchResult.images.length > 0;
-      const hasDocs = searchResult.documents.length > 0;
-      const hasVideos = searchResult.videos.length > 0;
-      const hasProducts = searchResult.matchedProducts.length > 0;
-
-      if (!hasImages && !hasDocs && !hasVideos && !hasProducts) {
-        const fallbackHint =
-          `I couldn't find exact matches for your search in ${companyName}'s library 😔\n\n` +
-          `Try searching with product names, categories, or keywords like:\n` +
-          botConfig.products
-            .slice(0, 5)
-            .map((p: any) => `• *${p.name}*: ${(Array.isArray(p.keywords) ? p.keywords : []).slice(0, 2).join(', ')}`)
-            .join('\n');
-        await this.send(organizationId, conversationId, fallbackHint);
-        return;
-      }
-
-      const totalCount =
-        searchResult.images.length +
-        searchResult.documents.length +
-        searchResult.videos.length;
-      const kwDisplay =
-        searchResult.matchedKeywords.length > 0
-          ? `for "${searchResult.matchedKeywords
-              .slice(0, 4)
-              .map(k => k[0].toUpperCase() + k.slice(1))
-              .join(', ')}"`
-          : 'for you';
-
-      let respText = `🔍 Found ${totalCount} relevant items ${kwDisplay} in ${companyName}'s content library ✨\n`;
-
-      if (hasImages) respText += `\n🖼️  Images (${searchResult.images.length}):\n${searchResult.images.slice(0, 3).join('\n')}`;
-      if (searchResult.images.length > 3) respText += `\n…+${searchResult.images.length - 3} more images`;
-
-      if (hasVideos) respText += `\n\n🎥  Videos (${searchResult.videos.length}):\n${searchResult.videos.slice(0, 2).join('\n')}`;
-      if (searchResult.videos.length > 2) respText += `\n…+${searchResult.videos.length - 2} more videos`;
-
-      if (hasDocs) respText += `\n\n📄  Documents (${searchResult.documents.length}):\n${searchResult.documents.slice(0, 2).join('\n')}`;
-      if (searchResult.documents.length > 2) respText += `\n…+${searchResult.documents.length - 2} more docs`;
-
-      if (hasProducts) {
-        const names = searchResult.matchedProducts
-          .slice(0, 5)
-          .map((p: any) => `• *${p.name}*`)
+      // ── CASE 5: Fallback — Helpful suggestions ──
+      if (productsList.length > 0) {
+        const suggestions = productsList
+          .slice(0, 8)
+          .map((p: any, i: number) => `${i + 1}. *${p.name || p.title}*`)
           .join('\n');
-        const more = searchResult.matchedProducts.length > 5
-          ? `\n…+${searchResult.matchedProducts.length - 5} more products`
-          : '';
-        respText += `\n\nMatching products:\n${names}${more}`;
-      }
+        const fallbackMsg =
+          `I couldn't find an exact match for "${cleanReply}" in ${companyName}'s catalog 😔\n\n` +
+          `Reply with any number or product name below to see photos & details:\n\n` +
+          `${suggestions}\n\n` +
+          `Or tap *Call Us* below to speak with our representative!`;
 
-      await this.send(organizationId, conversationId, respText);
-      return;
+        const sentFallback = await this.send(
+          organizationId,
+          conversationId,
+          fallbackMsg,
+          new Date(),
+          configuredBtns,
+        );
+        if (sentFallback) return [sentFallback];
+      }
     }
 
     const nodes = flow.nodes;
@@ -519,29 +691,28 @@ export class BotEngineService {
           sentAt: new Date(),
         },
       });
+      await this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }).catch(() => {});
       this.realtime.emitToOrg(organizationId, 'message:new', saved);
       return saved;
     };
 
+    // Combine caption and button links into one rich caption with all details
+    const fullCaption = formatButtonsIntoText(caption || '', buttons);
+
     // If buttons are configured, try to send ONE WhatsApp interactive
     // message with the media as its header, the caption as the body text,
-    // and the buttons attached — this renders as a single bubble on
-    // WhatsApp, matching how the bot builder preview looks.
+    // and the buttons attached
     if (buttons && buttons.length > 0) {
       try {
         const result = await this.messenger.sendButtonsMessage(
           recipientPhone,
-          caption || ' ',
+          (fullCaption || caption || ' ').slice(0, 1024),
           buttons,
           { headerMedia: { type, url: headerMediaUrl } },
         );
         if (!result.requiresTemplate) {
-          return [await persist(result, caption || null)];
+          return [await persist(result, fullCaption || caption || null)];
         }
-        // Button combination isn't sendable on a plain session message
-        // (e.g. a Call button, mixed types, or 2+ URL buttons) — fall
-        // through to sending media + a separate button message below so
-        // nothing is silently dropped.
       } catch {
         // fall through to plain media below
       }
@@ -550,32 +721,20 @@ export class BotEngineService {
     let result: { metaMessageId: string; status: string };
     try {
       if (type === 'image') {
-        result = await this.messenger.sendImage(recipientPhone, headerMediaUrl, caption);
+        result = await this.messenger.sendImage(recipientPhone, headerMediaUrl, fullCaption);
       } else if (type === 'video') {
-        result = await this.messenger.sendVideo(recipientPhone, headerMediaUrl, caption);
+        result = await this.messenger.sendVideo(recipientPhone, headerMediaUrl, fullCaption);
       } else {
-        result = await this.messenger.sendDocument(recipientPhone, headerMediaUrl, undefined, caption);
+        result = await this.messenger.sendDocument(recipientPhone, headerMediaUrl, undefined, fullCaption);
       }
     } catch {
       // never let header media failures break the rest of the bot reply
       return [];
     }
 
-    const mediaSaved = await persist(result, caption || null);
-    const savedMessages = [mediaSaved];
-
-    if (buttons && buttons.length > 0) {
-      const buttonFollowUp = await this.send(
-        organizationId,
-        conversationId,
-        'Please choose an option below:',
-        new Date(),
-        buttons,
-      );
-      if (buttonFollowUp) savedMessages.push(buttonFollowUp);
-    }
-
-    return savedMessages;
+    const mediaSaved = await persist(result, fullCaption || caption || null);
+    // Return SINGLE message with all details: NEVER send duplicate buttonFollowUp message!
+    return [mediaSaved];
   }
 
   private async sendBotUiMessages(
@@ -653,6 +812,7 @@ export class BotEngineService {
           sentAt: new Date(),
         },
       });
+      await this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }).catch(() => {});
       this.realtime.emitToOrg(organizationId, 'message:new', saved);
       results.push(saved);
     };
@@ -731,6 +891,7 @@ export class BotEngineService {
         sentAt,
       },
     });
+    await this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }).catch(() => {});
 
     this.realtime.emitToOrg(organizationId, 'message:new', message);
     return message;
@@ -875,15 +1036,15 @@ export class BotEngineService {
       }
 
       const recipientPhone = conversation.contact.mobile;
+      const fullText = formatButtonsIntoText(text, buttons);
 
       let result: { metaMessageId: string; status: string; error?: string; requiresTemplate?: boolean };
       if (buttons && buttons.length > 0) {
-        result = await this.messenger.sendButtonsMessage(recipientPhone, text, buttons);
+        result = await this.messenger.sendButtonsMessage(recipientPhone, (fullText || text).slice(0, 1024), buttons);
         if (result.requiresTemplate) {
-          // Button combo (e.g. mixed types, phone button, multiple URLs)
-          // isn't sendable as a plain session message. Don't drop the
-          // reply entirely — fall back to plain text.
-          result = await this.messenger.sendText(recipientPhone, text);
+          // Button combo (e.g. mixed types, phone button, multiple URLs like Contact Us + Location)
+          // isn't sendable as native interactive. Send full text with formatted clickable links!
+          result = await this.messenger.sendText(recipientPhone, fullText);
         }
       } else {
         result = await this.messenger.sendText(recipientPhone, text);
@@ -896,12 +1057,13 @@ export class BotEngineService {
           whatsappNumberId: number?.id || null,
           senderType: 'bot',
           messageType: 'text',
-          messageText: text,
+          messageText: fullText,
           metaMessageId: result.metaMessageId,
           status: result.status === 'failed' ? 'failed' : 'sent',
           sentAt,
         },
       });
+      await this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }).catch(() => {});
 
       this.realtime.emitToOrg(organizationId, 'message:new', message);
 
@@ -959,6 +1121,7 @@ export class BotEngineService {
         published: true,
         ...(flowId ? { id: BigInt(flowId) } : {}),
       },
+      orderBy: { updatedAt: 'desc' },
       include: { nodes: true, connections: true },
     });
   }

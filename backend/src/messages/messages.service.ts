@@ -11,7 +11,7 @@ import { WebhookDispatchService } from '../webhooks/webhook-dispatch.service';
 import { WalletService } from '../wallet/wallet.service';
 import { MockWhatsappService } from './mock-whatsapp.service';
 import { MessengerService } from './messenger.service';
-import { WebhookReceiverService } from './webhook-receiver.service';
+import { WebhookReceiverService, getPhoneVariants } from './webhook-receiver.service';
 import { SendMediaDto, SendTemplateDto, SendTextDto } from './dto/send-message.dto';
 import { BotEngineService } from './bot-engine.service';
 
@@ -93,6 +93,38 @@ export class MessagesService {
         parameters: params.map((p: string) => ({ type: 'text', text: p })),
       });
     }
+
+    if (dto.headerMediaUrl) {
+      const isVideo = /\.(mp4|mov|webm)$/i.test(dto.headerMediaUrl) || template.header?.toUpperCase() === '[VIDEO]';
+      const isDoc = /\.(pdf|docx?|xlsx?)$/i.test(dto.headerMediaUrl) || template.header?.toUpperCase() === '[DOCUMENT]';
+      const mediaType = isVideo ? 'video' : isDoc ? 'document' : 'image';
+      templateComponents.unshift({
+        type: 'header',
+        parameters: [{ type: mediaType, [mediaType]: { link: dto.headerMediaUrl } }],
+      });
+    }
+
+    let textToSave = body;
+    let parsedButtons: any[] = [];
+    if (template.buttons) {
+      try {
+        parsedButtons = typeof template.buttons === 'string'
+          ? JSON.parse(template.buttons)
+          : template.buttons;
+      } catch {}
+    }
+
+    if (template.header || template.footer || (parsedButtons && parsedButtons.length > 0)) {
+      textToSave = JSON.stringify({
+        header: template.header,
+        body,
+        footer: template.footer,
+        buttons: parsedButtons,
+        headerMediaUrl: dto.headerMediaUrl || null,
+        headerType: template.header ? template.header.replace(/[\[\]]/g, '').toLowerCase() : undefined,
+      });
+    }
+
     const cost = Number(this.config.get('COST_TEMPLATE') || '0.30');
     return this.dispatchMessage({
       organizationId,
@@ -101,7 +133,7 @@ export class MessagesService {
       number,
       senderType: 'agent',
       messageType: 'template',
-      text: body,
+      text: textToSave,
       templateName: template.name,
       templateLanguage: template.language || dto.language || 'en',
       templateComponents,
@@ -181,6 +213,7 @@ export class MessagesService {
         sentAt: new Date(),
       },
     });
+    await this.prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } }).catch(() => {});
     this.realtime.emitToOrg(organizationId, 'message:new', message);
     if (result.status === 'failed') {
       this.realtime.emitToOrg(organizationId, 'message:status', {
@@ -260,6 +293,22 @@ export class MessagesService {
       },
       include: { conversation: { include: { contact: true } } },
     });
+    await this.prisma.conversation.update({
+      where: { id: params.conversation.id },
+      data: {
+        status: 'open',
+        updatedAt: new Date(),
+      },
+    }).catch(() => {});
+
+    if (params.messageType === 'template') {
+      if (params.conversation.contact?.id) {
+        await this.prisma.contact.update({
+          where: { id: params.conversation.contact.id },
+          data: { lastInteraction: new Date() },
+        }).catch(() => {});
+      }
+    }
 
     this.realtime.emitToOrg(params.organizationId, 'message:new', message);
     this.webhooks.dispatch(params.organizationId, 'message.sent', message);
@@ -298,6 +347,22 @@ export class MessagesService {
       where: { id: BigInt(conversationId), organizationId: BigInt(organizationId) },
     });
     if (!conversation) throw new NotFoundException('Conversation not found');
+
+    // Mark unread customer messages as read when viewed by agent
+    await this.prisma.message
+      .updateMany({
+        where: {
+          conversationId: conversation.id,
+          senderType: 'customer',
+          readAt: null,
+        },
+        data: {
+          readAt: new Date(),
+          status: 'read',
+        },
+      })
+      .catch(() => {});
+
     return this.prisma.message.findMany({
       where: { conversationId: conversation.id },
       orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
@@ -384,8 +449,9 @@ export class MessagesService {
   }
 
   private async getOrCreateContact(organizationId: number, mobile: string) {
+    const variants = getPhoneVariants(mobile);
     let contact = await this.prisma.contact.findFirst({
-      where: { organizationId: BigInt(organizationId), mobile },
+      where: { organizationId: BigInt(organizationId), mobile: { in: variants } },
     });
     if (!contact) {
       contact = await this.prisma.contact.create({
@@ -409,12 +475,19 @@ export class MessagesService {
       where: {
         organizationId: BigInt(organizationId),
         contactId,
-        status: { in: ['open', 'pending'] },
       },
       orderBy: { updatedAt: 'desc' },
       include: { contact: true },
     });
-    if (!conversation) {
+    if (conversation) {
+      if (conversation.status !== 'open') {
+        conversation = await this.prisma.conversation.update({
+          where: { id: conversation.id },
+          data: { status: 'open', updatedAt: new Date() },
+          include: { contact: true },
+        });
+      }
+    } else {
       conversation = await this.prisma.conversation.create({
         data: {
           organizationId: BigInt(organizationId),

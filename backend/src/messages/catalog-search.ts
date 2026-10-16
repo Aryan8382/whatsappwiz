@@ -27,7 +27,7 @@ export interface CatalogProduct {
   [key: string]: unknown;
 }
 
-export type BotButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER';
+export type BotButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER' | 'LOCATION';
 
 export interface BotButton {
   id?: string;
@@ -441,9 +441,10 @@ export function getProductResources(product: CatalogProduct): string[] {
 
 export function isValidImageUrl(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
-  if (url.startsWith('/uploads/')) return true;
+  const trimmed = url.trim();
+  if (trimmed.startsWith('/uploads/') || trimmed.includes('/uploads/')) return true;
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(trimmed);
     const pathname = parsed.pathname.toLowerCase();
     return (
       SUPPORTED_IMAGE_EXT.some((ext) => pathname.endsWith(ext)) ||
@@ -453,14 +454,22 @@ export function isValidImageUrl(url: string): boolean {
       parsed.hostname.includes('pixabay.com') ||
       parsed.hostname.includes('cdn') ||
       parsed.hostname.includes('cloudinary') ||
+      parsed.hostname.includes('gstatic.com') ||
+      parsed.hostname.includes('googleusercontent.com') ||
+      parsed.hostname.includes('wp-content') ||
       parsed.hostname.includes('s3.') ||
       parsed.hostname.includes('amazonaws') ||
+      pathname.includes('image') ||
+      pathname.includes('img') ||
+      pathname.includes('photo') ||
       parsed.searchParams.has('w') ||
       parsed.searchParams.has('width') ||
-      /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/i.test(pathname)
+      parsed.searchParams.has('tbn') ||
+      /\.(jpg|jpeg|png|gif|webp|bmp|svg|avif)(\?|$)/i.test(pathname) ||
+      SUPPORTED_IMAGE_EXT.some((ext) => parsed.search.toLowerCase().includes(ext))
     );
   } catch {
-    return /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/i.test(url);
+    return /\.(jpg|jpeg|png|gif|webp|bmp|svg|avif)(\?|$)/i.test(trimmed);
   }
 }
 
@@ -618,46 +627,10 @@ export function sanitizeBotButtons(raw: unknown): {
     .filter((b) => b.text)
     .slice(0, 3);
 
-  const warnings: string[] = [];
-  const firstUrlText = parsed.find((b) => b.type === 'URL')?.text;
-  let seenUrl = false;
-  const cleaned: BotButton[] = [];
-
-  for (const b of parsed) {
-    if (b.type === 'URL') {
-      if (seenUrl) {
-        warnings.push(
-          `Website button "${b.text}" was not sent: WhatsApp only supports one Website button per message. Only the first Website button ("${firstUrlText}") is sent to customers — remove the extra one from the bot config.`,
-        );
-        continue;
-      }
-      seenUrl = true;
-    }
-    cleaned.push(b);
-  }
-
-  const hasPhone = cleaned.some((b) => b.type === 'PHONE_NUMBER');
-  const hasUrl = cleaned.some((b) => b.type === 'URL');
-  const hasQuickReply = cleaned.some((b) => b.type === 'QUICK_REPLY');
-  // Session (non-template) messages can't mix button types, and can't
-  // carry a PHONE_NUMBER button at all — those require an approved template.
-  const mixedTypes = [hasPhone, hasUrl, hasQuickReply].filter(Boolean).length > 1;
-
-  if (hasPhone) {
-    warnings.push(
-      'Call buttons require an approved WhatsApp message template and cannot be sent on a regular message.',
-    );
-  }
-  if (mixedTypes) {
-    warnings.push(
-      'Mixing Quick Reply, Website, and Call buttons in the same message requires an approved WhatsApp message template. Only one button type can be sent on a regular message.',
-    );
-  }
-
   return {
-    buttons: cleaned,
-    requiresTemplate: hasPhone || mixedTypes,
-    warnings,
+    buttons: parsed,
+    requiresTemplate: false,
+    warnings: [],
   };
 }
 
