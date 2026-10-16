@@ -109,18 +109,20 @@ export class ConversationsService {
     // If agentName provided but no valid agentId, resolve user from DB
     if ((!agentId || agentId <= 0) && agentName && agentName.trim().length > 0) {
       const clean = agentName.trim().toLowerCase();
-      const candidate = await this.prisma.user.findFirst({
-        where: {
-          organizationId: BigInt(organizationId),
-          OR: [
-            { firstName: { contains: clean } },
-            { lastName: { contains: clean } },
-            { email: { contains: clean } },
-          ],
-        },
-      });
-      if (candidate) {
-        agentId = Number(candidate.id);
+      if (clean !== 'unassigned' && clean !== 'unassign' && clean !== 'none') {
+        const candidate = await this.prisma.user.findFirst({
+          where: {
+            organizationId: BigInt(organizationId),
+            OR: [
+              { firstName: { contains: clean } },
+              { lastName: { contains: clean } },
+              { email: { contains: clean } },
+            ],
+          },
+        });
+        if (candidate) {
+          agentId = Number(candidate.id);
+        }
       }
     }
 
