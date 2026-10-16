@@ -159,53 +159,8 @@ async function main() {
   });
   console.log(`Demo wallet balance: ${wallet.balance} ${wallet.currency}`);
 
-  // Demo WABA + numbers
-  let waba = await prisma.wabaAccount.findFirst({
-    where: { organizationId: demoOrg.id },
-  });
-  if (!waba) {
-    waba = await prisma.wabaAccount.create({
-      data: {
-        organizationId: demoOrg.id,
-        businessId: 'BUS-001',
-        wabaId: 'WABA-001',
-        accessToken: `EAAG${'d'.repeat(40)}`,
-        tokenExpiry: new Date(Date.now() + 90 * 86400000),
-        status: 'connected',
-        qualityRating: 'GREEN',
-      },
-    });
-    await prisma.whatsappNumber.createMany({
-      data: [
-        { organizationId: demoOrg.id, wabaAccountId: waba.id, phoneNumber: '919000000001', phoneNumberId: 'PHONE-001', displayName: 'Sales', verificationStatus: 'verified', qualityRating: 'GREEN' },
-        { organizationId: demoOrg.id, wabaAccountId: waba.id, phoneNumber: '919000000002', phoneNumberId: 'PHONE-002', displayName: 'Support', verificationStatus: 'verified', qualityRating: 'GREEN' },
-      ],
-    });
-    console.log('Created demo WABA + 2 numbers');
-  }
-
-  // Demo contacts
-  const contactCount = await prisma.contact.count({
-    where: { organizationId: demoOrg.id },
-  });
-  if (contactCount === 0) {
-    const names = ['Ravi Kumar', 'Priya Sharma', 'Amit Patel', 'Sneha Gupta', 'Vikram Singh'];
-    const phones = ['919111111111', '919222222222', '919333333333', '919444444444', '919555555555'];
-    for (let i = 0; i < names.length; i++) {
-      const [first, ...rest] = names[i].split(' ');
-      await prisma.contact.create({
-        data: {
-          organizationId: demoOrg.id,
-          firstName: first,
-          lastName: rest.join(' '),
-          mobile: phones[i],
-          optIn: true,
-          source: 'seed',
-        },
-      });
-    }
-    console.log('Created 5 demo contacts');
-  }
+  // Real WABA and numbers are configured dynamically via Meta API / Dashboard
+  // No fake demo numbers or contacts seeded.
 
   // Approved templates for campaigns
   const templateCount = await prisma.template.count({
